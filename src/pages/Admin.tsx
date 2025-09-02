@@ -76,7 +76,6 @@ const AdminPage: React.FC = () => {
   // ---- Effects ----
   useEffect(() => {
     if (authLoading) return;
-    if (!isAdmin) return;
     fetchSummary();
     fetchJobs();
   }, [authLoading, isAdmin]);
