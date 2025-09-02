@@ -90,12 +90,19 @@ const DashboardPage: React.FC = () => {
                 </thead>
                 <tbody>
                   {jobs.map((job) => {
-                    $1const label = job.outputBlobKey?.match(/\.xlsx?$/i)
-  ? 'Download XLSX'
-  : job.outputBlobKey?.match(/\.csv$/i)
-  ? 'Download CSV'
-  : 'Download';
-return (
+                    const href = `/api/download?job=${encodeURIComponent(job.id)}`;
+                    const canDownload =
+                      (job.status || '').toLowerCase() === 'completed' ||
+                      (job.status || '').toLowerCase() === 'finished';
+
+                    // Choose link label by output extension (xlsx/xls → “Download XLSX”, csv → “Download CSV”, else “Download”)
+                    const label = job.outputBlobKey?.match(/\.xlsx?$/i)
+                      ? 'Download XLSX'
+                      : job.outputBlobKey?.match(/\.csv$/i)
+                      ? 'Download CSV'
+                      : 'Download';
+
+                    return (
                       <tr key={job.id}>
                         <td style={{ padding: '0.5rem', borderBottom: '1px solid #f3f4f6' }}>{job.fileName}</td>
                         <td style={{ padding: '0.5rem', borderBottom: '1px solid #f3f4f6' }}>{job.status}</td>
@@ -104,7 +111,6 @@ return (
                         </td>
                         <td style={{ padding: '0.5rem', borderBottom: '1px solid #f3f4f6' }}>
                           {canDownload ? (
-                            // No `download` attribute here so the server's Content-Disposition controls filename
                             <a href={href} style={{ color: '#2563eb' }}>{label}</a>
                           ) : (
                             '—'
@@ -113,6 +119,8 @@ return (
                       </tr>
                     );
                   })}
+
+
                 </tbody>
               </table>
             )}
