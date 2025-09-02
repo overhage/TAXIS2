@@ -1,43 +1,48 @@
-// netlify/functions/download.js
-const prisma = require('./utils/prisma');
-const { getUserFromRequest } = require('./utils/auth');
+// netlify/functions/download.mjs  (Functions v2, ESM)
+// Streams validated CSV from Netlify Blobs; Request/Response API.
 
-exports.handler = async (event) => {
-  const user = await getUserFromRequest(event);
-  if (!user) return { statusCode: 401, body: 'Unauthorized' };
+import { getStore } from '@netlify/blobs';
+import prismaCjs from './utils/prisma.js';
+import authUtilsCjs from './utils/auth.js';
 
-  const jobId = (event.queryStringParameters && event.queryStringParameters.job) || null;
-  if (!jobId) return { statusCode: 400, body: 'Missing job id' };
+const prisma = prismaCjs; // CJS default export
+const { getUserFromRequest } = authUtilsCjs; // named export from CJS module
 
-  const job = await prisma.job.findUnique({ where: { id: jobId }, include: { upload: true, User: true } });
-  if (!job) return { statusCode: 404, body: 'Job not found' };
+export default async (req) => {
+  try {
+    const url = new URL(req.url);
+    const jobId = url.searchParams.get('job');
+    if (!jobId) return new Response('Missing job id', { status: 400 });
 
-  // Only owner (or admin) can download
-  const isOwner = job.userId === user.id;
-  const isAdmin = user.isAdmin;
-  if (!isOwner && !isAdmin) return { statusCode: 403, body: 'Forbidden' };
+    // Reuse v1 auth util by passing only the cookie header
+    const eventLike = { headers: { cookie: req.headers.get('cookie') || '' } };
+    const user = await getUserFromRequest(eventLike);
+    if (!user) return new Response('Unauthorized', { status: 401 });
 
-  if (!job.outputBlobKey) return { statusCode: 404, body: 'No output available' };
+    const job = await prisma.job.findUnique({ where: { id: jobId } });
+    if (!job) return new Response('Job not found', { status: 404 });
 
-  // Dynamic import of Blobs in CommonJS
-  const { getStore } = await import('@netlify/blobs');
-  const outputsStore = getStore({ name: 'outputs' });
+    const isOwner = job.userId === user.id;
+    const isAdmin = user.isAdmin;
+    if (!isOwner && !isAdmin) return new Response('Forbidden', { status: 403 });
 
-  const arrayBuf = await outputsStore.get(job.outputBlobKey, { type: 'arrayBuffer' });
-  if (!arrayBuf) return { statusCode: 404, body: 'Output not found' };
+    if (!job.outputBlobKey) return new Response('No output available', { status: 404 });
 
-  const buf = Buffer.from(arrayBuf);
+    const outputs = getStore('outputs');
+    const arrBuf = await outputs.get(job.outputBlobKey, { type: 'arrayBuffer' });
+    if (!arrBuf) return new Response('Output not found', { status: 404 });
 
-  // Suggest a filename from the key
-  const suggested = job.outputBlobKey.split('/').pop() || 'output.csv';
+    const suggested = job.outputBlobKey.split('/').pop() || 'output.csv';
 
-  return {
-    statusCode: 200,
-    headers: {
-      'Content-Type': 'text/csv',
-      'Content-Disposition': `attachment; filename="${suggested}"`,
-    },
-    body: buf.toString('base64'),
-    isBase64Encoded: true,
-  };
+    return new Response(Buffer.from(arrBuf), {
+      status: 200,
+      headers: {
+        'content-type': 'text/csv',
+        'content-disposition': `attachment; filename="${suggested}"`,
+      },
+    });
+  } catch (err) {
+    console.error('download_v2_error', err);
+    return new Response('Internal server error', { status: 500 });
+  }
 };
