@@ -1,0 +1,42 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+*.log
+
+# Vite / builds
+dist/
+build/
+
+# Next/Vercel (not used, but harmless to ignore)
+.next/
+.vercel/
+
+# Netlify local cache
+.netlify/
+
+# Type checking / tooling caches
+.turbo/
+.cache/
+coverage/
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Upload artifacts (keep the placeholder)
+uploads/*
+!uploads/.gitkeep
+
+# Editor/project files
+.vscode/
+.idea/
+
+# zips and other local bundles
+*.zip
