@@ -1,93 +1,106 @@
+// netlify/functions/auth.js
 const prisma = require('./utils/prisma');
 const { createSession } = require('./utils/auth');
 
 const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 
-const clientId = process.env.GITHUB_CLIENT_ID;
-const clientSecret = process.env.GITHUB_CLIENT_SECRET;
+// Accept either var set
+const clientId = process.env.GITHUB_CLIENT_ID || process.env.GITHUB_ID;
+const clientSecret = process.env.GITHUB_CLIENT_SECRET || process.env.GITHUB_SECRET;
 
-exports.handler = async function (event, context) {
-  const url = new URL(event.rawUrl || `https://${event.headers.host}${event.path}`);
-  const code = url.searchParams.get('code');
-  // Step 1: If no code, start OAuth flow by redirecting the user to GitHub
-  if (!code) {
-    const redirectUri = `${url.origin}/api/login`;
-    const githubAuthUrl = `https://github.com/login/oauth/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(
-      redirectUri
-    )}&scope=user:email`;
-    return {
-      statusCode: 302,
-      headers: {
-        Location: githubAuthUrl,
-      },
-    };
-  }
-  // Step 2: Exchange code for an access token
+exports.handler = async function (event) {
   try {
+    const host = event.headers['x-forwarded-host'] || event.headers.host;
+    const proto = (event.headers['x-forwarded-proto'] || 'https');
+    // event.path will be like "/.netlify/functions/login" or "/.netlify/functions/auth"
+    const thisFnPath = event.path; // serverless mount
+    // Public URL path that the browser used (via your redirect rule): replace the mount with /api/<name>
+    const publicPath = thisFnPath.replace('/.netlify/functions', '/api');
+    const baseUrl = `${proto}://${host}`;
+    const callbackUrl = `${baseUrl}${publicPath}`;
+
+    const url = new URL(event.rawUrl || `${baseUrl}${publicPath}`);
+    const code = url.searchParams.get('code');
+
+    // Phase 1: redirect to GitHub authorization
+    if (!code) {
+      if (!clientId || !clientSecret) {
+        return { statusCode: 500, body: 'GitHub OAuth not configured' };
+      }
+      const authorize = new URL('https://github.com/login/oauth/authorize');
+      authorize.searchParams.set('client_id', clientId);
+      authorize.searchParams.set('redirect_uri', callbackUrl);
+      authorize.searchParams.set('scope', 'read:user user:email');
+
+      return {
+        statusCode: 302,
+        headers: { Location: authorize.toString() },
+      };
+    }
+
+    // Phase 2: exchange code for token
     const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
       method: 'POST',
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id: clientId,
+        client_secret: clientSecret,
+        code,
+        redirect_uri: callbackUrl,
+      }),
+    }).then(r => r.json());
+
+    if (!tokenRes.access_token) {
+      console.error('OAuth token error', tokenRes);
+      return { statusCode: 401, body: 'GitHub OAuth failed (no token)' };
+    }
+
+    const ghHeaders = { Authorization: `Bearer ${tokenRes.access_token}`, 'User-Agent': 'taxis2' };
+    const profile = await fetch('https://api.github.com/user', { headers: ghHeaders }).then(r => r.json());
+    // Try primary verified email
+    let email = profile.email;
+    if (!email) {
+      const emails = await fetch('https://api.github.com/user/emails', { headers: ghHeaders }).then(r => r.json());
+      const primary = Array.isArray(emails) ? emails.find(e => e.primary && e.verified) : null;
+      email = (primary && primary.email) || (Array.isArray(emails) && emails[0] && emails[0].email) || null;
+    }
+
+    if (!email) {
+      return { statusCode: 400, body: 'Unable to obtain email from GitHub' };
+    }
+
+    // Upsert user
+    const user = await prisma.user.upsert({
+      where: { email },
+      update: { name: profile.name || profile.login || null },
+      create: {
+        email,
+        name: profile.name || profile.login || null,
+        role: 'user',
       },
-      body: JSON.stringify({ client_id: clientId, client_secret: clientSecret, code }),
     });
-    const tokenJson = await tokenRes.json();
-    const accessToken = tokenJson.access_token;
-    if (!accessToken) {
-      return {
-        statusCode: 400,
-        body: JSON.stringify({ error: 'Failed to obtain access token' }),
-      };
-    }
-    // Step 3: Fetch user profile
-    const userRes = await fetch('https://api.github.com/user', {
-      headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/vnd.github+json' },
-    });
-    const userJson = await userRes.json();
-    // Step 4: Fetch user emails to find primary email
-    const emailRes = await fetch('https://api.github.com/user/emails', {
-      headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/vnd.github+json' },
-    });
-    const emails = await emailRes.json();
-    let primaryEmail = null;
-    if (Array.isArray(emails)) {
-      const primary = emails.find((e) => e.primary) || emails[0];
-      primaryEmail = primary && primary.email;
-    }
-    if (!primaryEmail) {
-      return {
-        statusCode: 400,
-        body: JSON.stringify({ error: 'Unable to determine primary email' }),
-      };
-    }
-    // Create or update user record
-    const existing = await prisma.user.findUnique({ where: { email: primaryEmail } });
-    let dbUser;
-    if (existing) {
-      dbUser = await prisma.user.update({
-        where: { email: primaryEmail },
-        data: { name: userJson.name || existing.name || null },
-      });
-    } else {
-      dbUser = await prisma.user.create({
-        data: { email: primaryEmail, name: userJson.name || '', role: 'user' },
-      });
-    }
-    // Create session
-    const { cookie } = await createSession(dbUser.id);
-    // Redirect to dashboard
+
+    // Create session + cookie
+    const session = await createSession(user.id);
+    const cookie = [
+      `session=${encodeURIComponent(session.token)}:${session.signature}`,
+      'Path=/',
+      'HttpOnly',
+      'SameSite=Lax',
+      'Secure',
+      `Max-Age=${30 * 24 * 60 * 60}`,
+    ].join('; ');
+
     return {
       statusCode: 302,
       headers: {
         'Set-Cookie': cookie,
-        Location: `${url.origin}/dashboard`,
+        // Send user to the app (dashboard route exists in the SPA)
+        Location: '/dashboard',
       },
     };
   } catch (err) {
-    return {
-      statusCode: 500,
-      body: JSON.stringify({ error: 'GitHub OAuth error', details: err.message }),
-    };
+    console.error(err);
+    return { statusCode: 500, body: 'Auth error' };
   }
 };
