@@ -2,7 +2,7 @@
 const prisma = require('./utils/prisma');
 const { createSession } = require('./utils/auth');
 
-// Accept either var name from Netlify env
+// Accept either var name from env
 const clientId = process.env.GITHUB_CLIENT_ID || process.env.GITHUB_ID;
 const clientSecret = process.env.GITHUB_CLIENT_SECRET || process.env.GITHUB_SECRET;
 
@@ -14,11 +14,10 @@ exports.handler = async function (event) {
   };
 
   try {
-    // Build callback URL that matches the path used to invoke this function
     const host = event.headers['x-forwarded-host'] || event.headers.host || '';
     const proto = event.headers['x-forwarded-proto'] || 'https';
-    const thisFnPath = event.path || '/.netlify/functions/login'; // e.g. "/.netlify/functions/login"
-    const publicPath = thisFnPath.replace('/.netlify/functions', '/api'); // e.g. "/api/login"
+    const thisFnPath = event.path || '/.netlify/functions/login'; // "/.netlify/functions/login"
+    const publicPath = thisFnPath.replace('/.netlify/functions', '/api'); // "/api/login"
     const baseUrl = `${proto}://${host}`;
     const callbackUrl = `${baseUrl}${publicPath}`;
 
@@ -48,8 +47,8 @@ exports.handler = async function (event) {
           client_id: clientId,
           client_secret: clientSecret,
           code,
-          redirect_uri: callbackUrl
-        })
+          redirect_uri: callbackUrl,
+        }),
       });
       tokenRes = await r.json();
     } catch (e) {
@@ -62,7 +61,7 @@ exports.handler = async function (event) {
 
     const ghHeaders = {
       Authorization: `Bearer ${tokenRes.access_token}`,
-      'User-Agent': 'taxis2'
+      'User-Agent': 'taxis2',
     };
 
     const profile = await (await fetch('https://api.github.com/user', { headers: ghHeaders })).json();
@@ -78,19 +77,19 @@ exports.handler = async function (event) {
     }
     if (!email) return fail('no_email_from_github', profile);
 
-    // Upsert user in DB
+    // Upsert user
     let user;
     try {
       user = await prisma.user.upsert({
         where: { email },
         update: { name: (profile && (profile.name || profile.login)) || null },
-        create: { email, name: (profile && (profile.name || profile.login)) || null, role: 'user' }
+        create: { email, name: (profile && (profile.name || profile.login)) || null, role: 'user' },
       });
     } catch (e) {
       return fail('prisma_upsert_failed', e);
     }
 
-    // Create session + cookie
+    // Create session + cookie (simple token only)
     let session;
     try {
       session = await createSession(user.id);
@@ -99,17 +98,17 @@ exports.handler = async function (event) {
     }
 
     const cookie = [
-      `session=${encodeURIComponent(session.token)}:${session.signature}`,
+      `session=${encodeURIComponent(session.token)}`,
       'Path=/',
       'HttpOnly',
       'SameSite=Lax',
       'Secure',
-      `Max-Age=${30 * 24 * 60 * 60}`
+      `Max-Age=${30 * 24 * 60 * 60}`,
     ].join('; ');
 
     return {
       statusCode: 302,
-      headers: { 'Set-Cookie': cookie, Location: '/dashboard' }
+      headers: { 'Set-Cookie': cookie, Location: '/dashboard' },
     };
   } catch (err) {
     return fail('unexpected', err);

@@ -1,29 +1,20 @@
+// netlify/functions/utils/auth.js
 const crypto = require('crypto');
 const prisma = require('./prisma');
 
-const SESSION_SECRET = process.env.SESSION_SECRET || 'default_secret';
-const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || '').split(',').map((e) => e.trim().toLowerCase());
+const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || '')
+  .split(',')
+  .map(e => e.trim().toLowerCase())
+  .filter(Boolean);
 
-/**
- * Generate a random session token.
- */
+// Create a 48-char random token
 function generateToken() {
   return crypto.randomBytes(24).toString('hex');
 }
 
-/**
- * Compute an HMAC signature for a value using the SESSION_SECRET.
- */
-function sign(value) {
-  return crypto.createHmac('sha256', SESSION_SECRET).update(value).digest('hex');
-}
-
-/**
- * Create a new session for a given userId. Returns the cookie string.
- */
+// Create a session row and return the token
 async function createSession(userId) {
   const token = generateToken();
-  const signature = sign(token);
   const expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
   await prisma.session.create({
     data: {
@@ -32,63 +23,56 @@ async function createSession(userId) {
       expires,
     },
   });
-  const cookieVal = `${token}:${signature}`;
-  return {
-    cookie: `session=${cookieVal}; Path=/; HttpOnly; Secure; SameSite=Lax; Expires=${expires.toUTCString()}`,
-    expires,
-  };
+  return { token, expires };
 }
 
-/**
- * Remove a session from the database.
- */
-async function destroySession(sessionToken) {
-  await prisma.session.deleteMany({ where: { sessionToken } });
-}
-
-/**
- * Parse cookies from a request header string.
- */
+// Parse cookies from event.headers.cookie
 function parseCookies(cookieHeader) {
-  const cookies = {};
-  if (!cookieHeader) return cookies;
-  const pairs = cookieHeader.split(/;\s*/);
-  for (const pair of pairs) {
-    const [key, ...rest] = pair.split('=');
-    cookies[key] = decodeURIComponent(rest.join('='));
+  const out = {};
+  if (!cookieHeader) return out;
+  for (const part of cookieHeader.split(/;\s*/)) {
+    const idx = part.indexOf('=');
+    if (idx > -1) {
+      const k = part.slice(0, idx);
+      const v = part.slice(idx + 1);
+      out[k] = decodeURIComponent(v);
+    }
   }
-  return cookies;
+  return out;
 }
 
-/**
- * Validate a session cookie and return the associated user.
- */
-async function getUserFromRequest(req) {
-  const cookies = parseCookies(req.headers.cookie || '');
-  const sessionCookie = cookies['session'];
-  if (!sessionCookie) return null;
-  const [token, signature] = sessionCookie.split(':');
-  if (!token || !signature) return null;
-  const expectedSig = sign(token);
-  if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSig))) {
-    return null;
-  }
-  const session = await prisma.session.findUnique({ where: { sessionToken: token }, include: { user: true } });
-  if (!session || session.expires < new Date()) {
-    return null;
-  }
-  if (!session.user) return null;
-  const user = session.user;
-  return {
-    id: user.id,
-    email: user.email,
-    name: user.name,
-    isAdmin: ADMIN_EMAILS.includes(user.email.toLowerCase()),
+// Look up session + user
+async function getUserFromRequest(event) {
+  const cookies = parseCookies(event.headers && event.headers.cookie);
+  const token = cookies && cookies.session;
+  if (!token) return null;
+
+  const session = await prisma.session.findUnique({
+    where: { sessionToken: token },
+    include: { user: true },
+  });
+
+  if (!session || !session.user) return null;
+  if (session.expires && session.expires < new Date()) return null;
+
+  const user = {
+    id: session.user.id,
+    email: session.user.email,
+    name: session.user.name || null,
+    isAdmin: ADMIN_EMAILS.includes((session.user.email || '').toLowerCase()),
   };
+  return user;
+}
+
+// Destroy session (logout)
+async function destroySessionByToken(token) {
+  try {
+    await prisma.session.delete({ where: { sessionToken: token } });
+  } catch (_) {}
 }
 
 module.exports = {
   createSession,
-  destroySession,
   getUserFromRequest,
+  destroySessionByToken,
 };
