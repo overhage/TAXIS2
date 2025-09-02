@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
 import Header from '../components/Header';
+import { useAuth } from '../hooks/useAuth';
 
 interface MasterRow {
   pairId: string;
@@ -9,18 +10,18 @@ interface MasterRow {
   concept_a_t: string;
   concept_b_t: string;
   cooc_event_count: number;
-  lift_lower_95: number;
-  lift_upper_95: number;
+  lift_lower_95: number | null;
+  lift_upper_95: number | null;
 }
 
-interface JobRow {
+interface AdminJobRow {
   id: string;
   fileName: string;
-  userEmail: string;
-  rowCount: number;
+  userEmail?: string;
+  rowCount?: number;
   createdAt: string;
   status: string;
-  outputUrl?: string;
+  outputUrl?: string; // server returns /api/download?job=<id>
 }
 
 /**
@@ -29,68 +30,111 @@ interface JobRow {
  * jobs/files based on filters.
  */
 const AdminPage: React.FC = () => {
+  const { isAdmin, loading: authLoading } = useAuth();
+
   const [summary, setSummary] = useState<{ count: number; lastUpdated: string } | null>(null);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<MasterRow[]>([]);
-  const [jobs, setJobs] = useState<JobRow[]>([]);
+  const [jobs, setJobs] = useState<AdminJobRow[]>([]);
   const [deleteFilters, setDeleteFilters] = useState({ date: '', status: '', user: '' });
   const [loadingSummary, setLoadingSummary] = useState(true);
   const [loadingJobs, setLoadingJobs] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // ---- Data loaders ----
+  const fetchSummary = async () => {
+    try {
+      setLoadingSummary(true);
+      // Adjust the endpoint name if your API differs
+      const res = await axios.get('/api/admin/master-summary', { withCredentials: true });
+      setSummary(res.data);
+    } catch (err: any) {
+      setError(err?.message ?? 'Failed to fetch master summary');
+    } finally {
+      setLoadingSummary(false);
+    }
+  };
+
+  const fetchJobs = async () => {
+    try {
+      setLoadingJobs(true);
+      // Use credentials so session cookies pass through
+      const res = await fetch('/api/admin-jobs', { credentials: 'include' });
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`admin-jobs ${res.status}: ${body}`);
+      }
+      const data: AdminJobRow[] = await res.json();
+      setJobs(data);
+    } catch (e: any) {
+      setError(e?.message ?? 'Failed to load admin jobs');
+    } finally {
+      setLoadingJobs(false);
+    }
+  };
+
+  // ---- Effects ----
   useEffect(() => {
-    const fetchSummary = async () => {
-      try {
-        const res = await axios.get('/api/admin/summary');
-        setSummary(res.data);
-      } catch (err) {
-        setError('Failed to fetch summary');
-      } finally {
-        setLoadingSummary(false);
-      }
-    };
-    const fetchJobs = async () => {
-      try {
-        const res = await axios.get('/api/admin/jobs');
-        setJobs(res.data);
-      } catch (err) {
-        setError('Failed to fetch jobs');
-      } finally {
-        setLoadingJobs(false);
-      }
-    };
+    if (authLoading) return;
+    if (!isAdmin) return;
     fetchSummary();
     fetchJobs();
-  }, []);
+  }, [authLoading, isAdmin]);
 
+  // ---- Handlers ----
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await axios.get('/api/admin/master-record', { params: { query } });
+      const res = await axios.get('/api/admin/master-record', {
+        params: { query },
+        withCredentials: true,
+      });
       setResults(res.data);
-    } catch (err) {
-      setError('Failed to search master record');
+    } catch (err: any) {
+      setError(err?.message ?? 'Failed to search master record');
     }
   };
 
   const handleDelete = async () => {
     try {
-      await axios.delete('/api/admin/jobs', { data: deleteFilters });
-      // Refresh jobs list
-      const res = await axios.get('/api/admin/jobs');
-      setJobs(res.data);
+      await axios.delete('/api/admin-jobs', {
+        data: deleteFilters,
+        withCredentials: true,
+      });
+      await fetchJobs();
       setDeleteFilters({ date: '', status: '', user: '' });
-    } catch (err) {
-      setError('Failed to delete jobs');
+    } catch (err: any) {
+      setError(err?.message ?? 'Failed to delete jobs');
     }
   };
 
+  // ---- Early auth-gate rendering ----
+  if (authLoading) {
+    return (
+      <div>
+        <Header title="Admin" />
+        <main className="p-4">Checking admin status…</main>
+      </div>
+    );
+  }
+
+  if (!isAdmin) {
+    return (
+      <div>
+        <Header title="Admin" />
+        <main className="p-4">You do not have admin access.</main>
+      </div>
+    );
+  }
+
+  // ---- Main render ----
   return (
     <div>
       <Header title="Administrator Dashboard" />
       <main style={{ padding: '1rem' }}>
         {error && <p style={{ color: '#b91c1c' }}>{error}</p>}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '2rem' }}>
+          {/* Master Record Summary & Search */}
           <section>
             <h2 style={{ fontSize: '1.25rem', marginBottom: '0.5rem' }}>Master Record Summary</h2>
             {loadingSummary ? (
@@ -98,7 +142,12 @@ const AdminPage: React.FC = () => {
             ) : summary ? (
               <div>
                 <p>Total rows: {summary.count}</p>
-                <p>Last updated: {new Date(summary.lastUpdated).toLocaleString('en-US', { timeZone: 'America/Indiana/Indianapolis' })}</p>
+                <p>
+                  Last updated:{' '}
+                  {new Date(summary.lastUpdated).toLocaleString('en-US', {
+                    timeZone: 'America/Indiana/Indianapolis',
+                  })}
+                </p>
                 <form onSubmit={handleSearch} style={{ marginTop: '1rem' }}>
                   <input
                     type="text"
@@ -109,7 +158,13 @@ const AdminPage: React.FC = () => {
                   />
                   <button
                     type="submit"
-                    style={{ padding: '0.25rem 0.5rem', backgroundColor: '#2563eb', color: '#fff', border: 'none', borderRadius: '0.25rem' }}
+                    style={{
+                      padding: '0.25rem 0.5rem',
+                      backgroundColor: '#2563eb',
+                      color: '#fff',
+                      border: 'none',
+                      borderRadius: '0.25rem',
+                    }}
                   >
                     Search
                   </button>
@@ -132,7 +187,9 @@ const AdminPage: React.FC = () => {
                             <td style={{ padding: '0.5rem', borderBottom: '1px solid #f3f4f6' }}>{row.concept_b_t}</td>
                             <td style={{ padding: '0.5rem', borderBottom: '1px solid #f3f4f6' }}>{row.cooc_event_count}</td>
                             <td style={{ padding: '0.5rem', borderBottom: '1px solid #f3f4f6' }}>
-                              {row.lift_lower_95.toFixed(2)} – {row.lift_upper_95.toFixed(2)}
+                              {row.lift_lower_95 != null && row.lift_upper_95 != null
+                                ? `${row.lift_lower_95.toFixed(2)} – ${row.lift_upper_95.toFixed(2)}`
+                                : '—'}
                             </td>
                           </tr>
                         ))}
@@ -141,10 +198,7 @@ const AdminPage: React.FC = () => {
                   </div>
                 )}
                 <div style={{ marginTop: '0.5rem' }}>
-                  <a
-                    href="/api/admin/download-master"
-                    style={{ color: '#2563eb', textDecoration: 'underline' }}
-                  >
+                  <a href="/api/admin/download-master" style={{ color: '#2563eb', textDecoration: 'underline' }}>
                     Download MasterRecord
                   </a>
                 </div>
@@ -153,38 +207,44 @@ const AdminPage: React.FC = () => {
               <p>No summary available</p>
             )}
           </section>
+
+          {/* Jobs List */}
           <section>
-            <h2 style={{ fontSize: '1.25rem', marginBottom: '0.5rem' }}>All Jobs</h2>
+            <h2 className="text-xl font-semibold mb-2">All Jobs</h2>
             {loadingJobs ? (
-              <p>Loading…</p>
+              <div>Loading…</div>
             ) : jobs.length === 0 ? (
-              <p>No uploaded jobs.</p>
+              <div>No jobs found.</div>
             ) : (
-              <div style={{ maxHeight: '240px', overflowY: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <div className="overflow-x-auto">
+                <table className="min-w-full border-collapse">
                   <thead>
                     <tr>
-                      <th style={{ textAlign: 'left', padding: '0.5rem', borderBottom: '1px solid #e5e7eb' }}>File</th>
-                      <th style={{ textAlign: 'left', padding: '0.5rem', borderBottom: '1px solid #e5e7eb' }}>User</th>
-                      <th style={{ textAlign: 'left', padding: '0.5rem', borderBottom: '1px solid #e5e7eb' }}>Records</th>
-                      <th style={{ textAlign: 'left', padding: '0.5rem', borderBottom: '1px solid #e5e7eb' }}>Uploaded</th>
-                      <th style={{ textAlign: 'left', padding: '0.5rem', borderBottom: '1px solid #e5e7eb' }}>Status</th>
-                      <th style={{ textAlign: 'left', padding: '0.5rem', borderBottom: '1px solid #e5e7eb' }}>Output</th>
+                      <th className="text-left p-2 border-b">ID</th>
+                      <th className="text-left p-2 border-b">File</th>
+                      <th className="text-left p-2 border-b">User</th>
+                      <th className="text-left p-2 border-b">Rows</th>
+                      <th className="text-left p-2 border-b">Created</th>
+                      <th className="text-left p-2 border-b">Status</th>
+                      <th className="text-left p-2 border-b">Output</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {jobs.map((job) => (
-                      <tr key={job.id}>
-                        <td style={{ padding: '0.5rem', borderBottom: '1px solid #f3f4f6' }}>{job.fileName}</td>
-                        <td style={{ padding: '0.5rem', borderBottom: '1px solid #f3f4f6' }}>{job.userEmail}</td>
-                        <td style={{ padding: '0.5rem', borderBottom: '1px solid #f3f4f6' }}>{job.rowCount}</td>
-                        <td style={{ padding: '0.5rem', borderBottom: '1px solid #f3f4f6' }}>
-                          {new Date(job.createdAt).toLocaleString('en-US', { timeZone: 'America/Indiana/Indianapolis' })}
+                    {jobs.map((j) => (
+                      <tr key={j.id}>
+                        <td className="p-2 border-b align-top">{j.id}</td>
+                        <td className="p-2 border-b align-top">{j.fileName}</td>
+                        <td className="p-2 border-b align-top">{j.userEmail || '—'}</td>
+                        <td className="p-2 border-b align-top">{j.rowCount ?? '—'}</td>
+                        <td className="p-2 border-b align-top">
+                          {new Date(j.createdAt).toLocaleString('en-US', {
+                            timeZone: 'America/Indiana/Indianapolis',
+                          })}
                         </td>
-                        <td style={{ padding: '0.5rem', borderBottom: '1px solid #f3f4f6' }}>{job.status}</td>
-                        <td style={{ padding: '0.5rem', borderBottom: '1px solid #f3f4f6' }}>
-                          {job.outputUrl ? (
-                            <a href={job.outputUrl} style={{ color: '#2563eb' }} download>
+                        <td className="p-2 border-b align-top">{j.status}</td>
+                        <td className="p-2 border-b align-top">
+                          {j.outputUrl ? (
+                            <a href={j.outputUrl} className="text-blue-600 underline">
                               Download
                             </a>
                           ) : (
@@ -198,11 +258,12 @@ const AdminPage: React.FC = () => {
               </div>
             )}
           </section>
+
+          {/* Delete Jobs */}
           <section>
             <h2 style={{ fontSize: '1.25rem', marginBottom: '0.5rem' }}>Delete Jobs</h2>
             <p style={{ fontSize: '0.875rem', marginBottom: '0.5rem' }}>
-              Use the filters below to delete jobs and their associated files. Leave
-              a field blank to ignore that filter.
+              Use the filters below to delete jobs and their associated files. Leave a field blank to ignore that filter.
             </p>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
               <input
