@@ -1,45 +1,43 @@
-const fs = require('fs');
-const path = require('path');
+// netlify/functions/download.js
 const prisma = require('./utils/prisma');
 const { getUserFromRequest } = require('./utils/auth');
 
-const uploadsDir = path.join(__dirname, '..', '..', 'uploads');
-
-exports.handler = async function (event) {
+exports.handler = async (event) => {
   const user = await getUserFromRequest(event);
-  if (!user) {
-    return { statusCode: 401, body: 'Unauthorized' };
-  }
-  const params = event.queryStringParameters || {};
-  const jobId = params.jobId;
-  if (!jobId) {
-    return { statusCode: 400, body: 'jobId parameter is required' };
-  }
+  if (!user) return { statusCode: 401, body: 'Unauthorized' };
+
+  const jobId = (event.queryStringParameters && event.queryStringParameters.job) || null;
+  if (!jobId) return { statusCode: 400, body: 'Missing job id' };
+
   const job = await prisma.job.findUnique({ where: { id: jobId }, include: { upload: true, User: true } });
-  if (!job || !job.outputBlobKey) {
-    return { statusCode: 404, body: 'File not found' };
-  }
-  // Only allow if user is owner or admin
-  const isOwner = job.upload.userId === user.id || job.userId === user.id;
-  if (!isOwner && !user.isAdmin) {
-    return { statusCode: 403, body: 'Forbidden' };
-  }
-  const filePath = path.join(uploadsDir, job.outputBlobKey);
-  if (!fs.existsSync(filePath)) {
-    return { statusCode: 404, body: 'File not found' };
-  }
-  const buffer = fs.readFileSync(filePath);
-  const ext = path.extname(filePath).toLowerCase();
-  let contentType = 'application/octet-stream';
-  if (ext === '.csv') contentType = 'text/csv';
-  if (ext === '.xlsx') contentType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  if (!job) return { statusCode: 404, body: 'Job not found' };
+
+  // Only owner (or admin) can download
+  const isOwner = job.userId === user.id;
+  const isAdmin = user.isAdmin;
+  if (!isOwner && !isAdmin) return { statusCode: 403, body: 'Forbidden' };
+
+  if (!job.outputBlobKey) return { statusCode: 404, body: 'No output available' };
+
+  // Dynamic import of Blobs in CommonJS
+  const { getStore } = await import('@netlify/blobs');
+  const outputsStore = getStore({ name: 'outputs' });
+
+  const arrayBuf = await outputsStore.get(job.outputBlobKey, { type: 'arrayBuffer' });
+  if (!arrayBuf) return { statusCode: 404, body: 'Output not found' };
+
+  const buf = Buffer.from(arrayBuf);
+
+  // Suggest a filename from the key
+  const suggested = job.outputBlobKey.split('/').pop() || 'output.csv';
+
   return {
     statusCode: 200,
     headers: {
-      'Content-Type': contentType,
-      'Content-Disposition': `attachment; filename="${job.upload.originalName.replace(/\.[^.]+$/, '')}_validated${ext}"`,
+      'Content-Type': 'text/csv',
+      'Content-Disposition': `attachment; filename="${suggested}"`,
     },
-    body: buffer.toString('base64'),
+    body: buf.toString('base64'),
     isBase64Encoded: true,
   };
 };

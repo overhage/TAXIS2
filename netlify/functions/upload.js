@@ -1,6 +1,4 @@
 const Busboy = require('busboy');
-const fs = require('fs');
-const path = require('path');
 const { Configuration, OpenAIApi } = require('openai');
 const parseCsv = require('csv-parse/sync').parse;
 const XLSX = require('xlsx');
@@ -101,13 +99,16 @@ exports.handler = async function (event) {
   if (!user) {
     return { statusCode: 401, body: JSON.stringify({ error: 'Not authenticated' }) };
   }
+  // Dynamic import so it works in CommonJS
+const { getStore } = await import('@netlify/blobs');
+// two logical stores
+const uploadsStore = getStore({ name: 'uploads' });
+const outputsStore = getStore({ name: 'outputs' });
+
   if (event.httpMethod !== 'POST') {
     return { statusCode: 405, body: 'Method Not Allowed' };
   }
-  // Create uploads directory if not exists
-  if (!fs.existsSync(uploadsDir)) {
-    fs.mkdirSync(uploadsDir, { recursive: true });
-  }
+
   return new Promise((resolve, reject) => {
     const busboy = new Busboy({ headers: event.headers });
     let fileBuffer = Buffer.alloc(0);
@@ -132,11 +133,27 @@ exports.handler = async function (event) {
           resolve({ statusCode: 400, body: JSON.stringify({ error }) });
           return;
         }
+        function safeBase(name) {
+          const base = (name || 'file').replace(/\.[^./]+$/, '');
+          return base || 'file';
+        }
+
+        const userId = user.id;
+        const stamp = Date.now();
+        const base = safeBase(originalName);
+
+        // Save original upload
+        const uploadKey = `${userId}/${stamp}_${base}.csv`; // or .xlsx based on extension
+        await uploadsStore.set(uploadKey, fileBuffer, {
+          contentType,
+          metadata: { originalName },
+        });
+
         // Save uploaded file to disk
         const timestamp = Date.now();
         const blobKey = `${timestamp}_${fileName}`;
         const inputPath = path.join(uploadsDir, blobKey);
-        fs.writeFileSync(inputPath, fileBuffer);
+       
         // Create Upload record
         const uploadRecord = await prisma.upload.create({
           data: {
@@ -168,32 +185,49 @@ exports.handler = async function (event) {
           processedCount++;
           // Update job progress occasionally (optional: skip due to performance)
         }
-        // Write output CSV
-        const outputFileName = fileName.replace(/\.[^.]+$/, '') + '_validated.csv';
-        const outputBlobKey = `${timestamp}_${outputFileName}`;
-        const outputPath = path.join(uploadsDir, outputBlobKey);
-        const header = Object.keys(outputRows[0]);
-        const lines = [];
-        lines.push(header.join(','));
-        for (const row of outputRows) {
-          const values = header.map((h) => {
-            const val = row[h];
-            const escaped = String(val).replace(/"/g, '""');
-            return `"${escaped}"`;
-          });
-          lines.push(values.join(','));
-        }
-        fs.writeFileSync(outputPath, lines.join('\n'));
-        // Update job record as completed
-        jobRecord = await prisma.job.update({
-          where: { id: jobRecord.id },
-          data: {
-            status: 'completed',
-            rowsProcessed: processedCount,
-            outputBlobKey: outputBlobKey,
-            finishedAt: new Date(),
-          },
-        });
+        const prisma = require('./utils/prisma');
+        const { getUserFromRequest } = require('./utils/auth');
+
+        exports.handler = async (event) => {
+          const user = await getUserFromRequest(event);
+          if (!user) return { statusCode: 401, body: 'Unauthorized' };
+
+          const jobId = (event.queryStringParameters && event.queryStringParameters.job) || null;
+          if (!jobId) return { statusCode: 400, body: 'Missing job id' };
+
+          const job = await prisma.job.findUnique({ where: { id: jobId }, include: { upload: true, User: true } });
+          if (!job) return { statusCode: 404, body: 'Job not found' };
+
+          // Only owner (or admin) can download
+          const isOwner = job.userId === user.id;
+          const isAdmin = user.isAdmin;
+          if (!isOwner && !isAdmin) return { statusCode: 403, body: 'Forbidden' };
+
+          if (!job.outputBlobKey) return { statusCode: 404, body: 'No output available' };
+
+          // Dynamic import of Blobs in CommonJS
+          const { getStore } = await import('@netlify/blobs');
+          const outputsStore = getStore({ name: 'outputs' });
+
+          const arrayBuf = await outputsStore.get(job.outputBlobKey, { type: 'arrayBuffer' });
+          if (!arrayBuf) return { statusCode: 404, body: 'Output not found' };
+
+          const buf = Buffer.from(arrayBuf);
+
+          // Suggest a filename from the key
+          const suggested = job.outputBlobKey.split('/').pop() || 'output.csv';
+
+          return {
+            statusCode: 200,
+            headers: {
+              'Content-Type': 'text/csv',
+              'Content-Disposition': `attachment; filename="${suggested}"`,
+            },
+            body: buf.toString('base64'),
+            isBase64Encoded: true,
+          };
+        
+        };
         resolve({ statusCode: 200, body: JSON.stringify({ jobId: jobRecord.id }) });
       } catch (err) {
         console.error(err);
