@@ -12,7 +12,8 @@ NODE_VERSION = "20"
 node_bundler = "esbuild"
 external_node_modules = ["@prisma/client", "prisma"]
 included_files = [
-"node_modules/.prisma/**"
+  "node_modules/.prisma/**",
+  "node_modules/@prisma/client/**"
 ]
 
 [[redirects]]

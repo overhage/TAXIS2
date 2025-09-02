@@ -3,9 +3,13 @@
 
 import { getStore } from '@netlify/blobs';
 import prismaCjs from './utils/prisma.js';
+import { PrismaClient } from '@prisma/client';
 import authUtilsCjs from './utils/auth.js';
 
-const prisma = prismaCjs; // CJS default export
+const prisma = globalThis.__prisma || new PrismaClient();
+// cache the client across invocations
+// @ts-ignore
+globalThis.__prisma = prisma;
 const { getUserFromRequest } = authUtilsCjs; // named export from CJS module
 
 export default async (req) => {

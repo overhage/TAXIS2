@@ -6,8 +6,12 @@ import { parse as parseCsv } from 'csv-parse/sync';
 import * as XLSX from 'xlsx';
 
 import prismaCjs from './utils/prisma.js';
+import { PrismaClient } from '@prisma/client';
 import authUtilsCjs from './utils/auth.js';
-const prisma = prismaCjs;
+const prisma = globalThis.__prisma || new PrismaClient();
+// cache the client across invocations
+// @ts-ignore
+globalThis.__prisma = prisma;
 const { getUserFromRequest } = authUtilsCjs;
 
 const REQUIRED_COLUMNS = [
