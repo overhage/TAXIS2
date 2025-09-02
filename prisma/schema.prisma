@@ -1,0 +1,189 @@
+// prisma/schema.prisma — cleaned formatting & syntax
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
+}
+
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum JobStatus {
+  queued
+  running
+  completed
+  failed
+}
+
+model User {
+  id        String    @id @default(cuid())
+  email     String    @unique
+  name      String?
+  role      String
+
+  uploads   Upload[]
+  jobs      Job[]
+
+  // NextAuth relations
+  accounts  Account[]
+  sessions  Session[]
+
+  createdAt DateTime  @default(now())
+}
+
+model Upload {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id])
+
+  blobKey      String
+  originalName String
+  createdAt    DateTime @default(now())
+
+  jobs         Job[]
+
+  // Optional metadata (used by app)
+  store        String?  @db.VarChar(20)
+  contentType  String?  @db.VarChar(100)
+  size         Int?
+}
+
+model Job {
+  id            String    @id @default(cuid())
+
+  uploadId      String
+  upload        Upload    @relation(fields: [uploadId], references: [id])
+
+  status        JobStatus @default(queued)
+  error         String?
+  rowsTotal     Int?
+  rowsProcessed Int?
+  outputBlobKey String?
+  tokensIn      Int?
+  tokensOut     Int?
+  costCents     Int?
+
+  createdAt     DateTime  @default(now())
+  startedAt     DateTime?
+  finishedAt    DateTime?
+
+  // Relation to User (field name kept as `User` to match existing code)
+  userId        String?
+  User          User?     @relation(fields: [userId], references: [id])
+}
+
+model MasterRecord {
+  // Identifier for a pair of concepts
+  pairId String @id
+
+  // Clinical concepts & codes
+  concept_a String @db.VarChar(255)
+  code_a    String @db.VarChar(20)
+  concept_b String @db.VarChar(255)
+  code_b    String @db.VarChar(20)
+  system_a  String @db.VarChar(12)
+  system_b  String @db.VarChar(12)
+  type_a    String @db.VarChar(20)
+  type_b    String @db.VarChar(20)
+
+  // Counts & frequencies
+  cooc_obs         Int
+  nA               Int
+  nB               Int
+  total_persons    Int
+  cooc_event_count Int
+  a_before_b       Int
+  b_before_a       Int
+
+  // Statistical measures (fixed precision)
+  expected_obs           Decimal @db.Decimal(19, 2)
+  lift                   Decimal @db.Decimal(19, 4)
+  lift_lower_95          Decimal @db.Decimal(19, 4)
+  lift_upper_95          Decimal @db.Decimal(19, 4)
+  z_score                Decimal @db.Decimal(19, 4)
+  ab_h                   Decimal @db.Decimal(19, 2)
+  a_only_h               Decimal @db.Decimal(19, 2)
+  b_only_h               Decimal @db.Decimal(19, 2)
+  neither_h              Decimal @db.Decimal(19, 2)
+  odds_ratio             Decimal @db.Decimal(19, 4)
+  or_lower_95            Decimal @db.Decimal(19, 4)
+  or_upper_95            Decimal @db.Decimal(19, 4)
+  directionality_ratio   Decimal @db.Decimal(19, 4)
+  dir_prop_a_before_b    Decimal @db.Decimal(19, 4)
+  dir_lower_95           Decimal @db.Decimal(19, 4)
+  dir_upper_95           Decimal @db.Decimal(19, 4)
+  confidence_a_to_b      Decimal @db.Decimal(19, 4)
+  confidence_b_to_a      Decimal @db.Decimal(19, 4)
+
+  // Relationship fields
+  relationshipType String @db.VarChar(64)
+  relationshipCode Int
+  rational         String @db.VarChar(1024)
+
+  // Metadata
+  source_count     Int
+  llm_date         DateTime?
+  llm_name         String?  @db.VarChar(100)
+  llm_version      String?  @db.VarChar(50)
+  human_date       DateTime?
+  human_reviewer   String?  @db.VarChar(254)
+  human_comment    String?  @db.VarChar(255)
+  status           String   @db.VarChar(12)
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([code_a, system_a])
+  @@index([code_b, system_b])
+}
+
+model LlmCache {
+  id        String   @id @default(cuid())
+  promptKey String   @unique
+  result    String
+  tokensIn  Int?
+  tokensOut Int?
+  model     String?
+  createdAt DateTime @default(now())
+}
+
+// --- NextAuth (v4 Prisma Adapter schema) ---
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
