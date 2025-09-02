@@ -2,7 +2,7 @@ const Busboy = require('busboy');
 const fs = require('fs');
 const path = require('path');
 const { Configuration, OpenAIApi } = require('openai');
-const { parse: parseCsv } = require('csv-parse/sync');
+const parseCsv = require('csv-parse/sync').parse;
 const XLSX = require('xlsx');
 const prisma = require('./utils/prisma');
 const { getUserFromRequest } = require('./utils/auth');
@@ -69,7 +69,7 @@ function parseAndValidate(buffer, filename) {
   let rows = [];
   if (ext === '.csv') {
     const text = buffer.toString('utf-8');
-    const records = xtext, { columns: true, skip_empty_lines: true, trim: true, });
+    const records = parseCsv(text, { columns: true, skip_empty_lines: true, trim: true, });
     rows = records;
   } else if (ext === '.xlsx' || ext === '.xls') {
     const workbook = XLSX.read(buffer, { type: 'buffer' });
