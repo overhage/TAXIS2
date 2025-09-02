@@ -4,11 +4,15 @@
   "private": true,
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "tsc -b && vite build",
     "preview": "vite preview",
     "prisma:generate": "prisma generate",
     "postinstall": "prisma generate"
   },
+  "engines": {
+    "node": ">=20 <21"
+  },  
+  "packageManager": "npm@10",
   "dependencies": {
     "@prisma/client": "^5.0.0",
     "openai": "^3.2.1",
