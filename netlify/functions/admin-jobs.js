@@ -3,89 +3,138 @@ const path = require('path');
 const prisma = require('./utils/prisma');
 const { getUserFromRequest } = require('./utils/auth');
 
+// NOTE: Local filesystem paths won't exist on Netlify when using Blobs.
+// We guard all fs calls so they never crash if using remote storage.
 const uploadsDir = path.join(__dirname, '..', '..', 'uploads');
 
 exports.handler = async function (event) {
+  // CORS (optional; harmless if same-origin)
+  if (event.httpMethod === 'OPTIONS') {
+    return {
+      statusCode: 204,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET,DELETE,OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      },
+    };
+  }
+
   const user = await getUserFromRequest(event);
   if (!user || !user.isAdmin) {
     return { statusCode: 403, body: JSON.stringify({ error: 'Forbidden' }) };
   }
+
   if (event.httpMethod === 'GET') {
-    // Return all jobs with details
-    const jobs = await prisma.job.findMany({
-      include: { upload: { include: { user: true } } },
-      orderBy: { createdAt: 'desc' },
-    });
-    const results = jobs.map((job) => {
-      return {
+    try {
+      // Return all jobs with details
+      const jobs = await prisma.job.findMany({
+        include: { upload: { include: { user: true } } },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      const results = jobs.map((job) => ({
         id: job.id,
-        fileName: job.upload.originalName,
-        userEmail: job.upload.user.email,
-        rowCount: job.rowsTotal || 0,
-        createdAt: job.createdAt,
+        fileName: job.upload?.originalName ?? '(unknown)',
+        userEmail: job.upload?.user?.email ?? '',
+        rowCount: job.rowsTotal ?? 0,
+        createdAt: job.createdAt instanceof Date ? job.createdAt.toISOString() : job.createdAt,
         status: job.status,
-        outputUrl: job.outputBlobKey ? `/api/download?jobId=${job.id}` : undefined,
+        // Align with the main dashboard/linking convention
+        outputUrl: job.outputBlobKey ? `/api/download?job=${encodeURIComponent(job.id)}` : undefined,
+      }));
+
+      return {
+        statusCode: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(results),
       };
-    });
-    return {
-      statusCode: 200,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(results),
-    };
+    } catch (err) {
+      return {
+        statusCode: 500,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ error: err?.message || 'Failed to load jobs' }),
+      };
+    }
   }
+
   if (event.httpMethod === 'DELETE') {
     try {
-      const filters = JSON.parse(event.body || '{}');
-      const whereClauses = [];
-      // Filter by date (delete jobs uploaded on or before date)
+      const filters = safeJsonParse(event.body) || {};
+
+      // Build a Prisma where clause safely
+      /** @type {import('@prisma/client').Prisma.JobWhereInput} */
+      const where = {};
+
       if (filters.date) {
         const dateObj = new Date(filters.date);
         if (!isNaN(dateObj)) {
-          whereClauses.push({ createdAt: { lte: dateObj } });
+          where.createdAt = { lte: dateObj };
         }
       }
-      // Filter by status
+
       if (filters.status) {
-        whereClauses.push({ status: filters.status });
+        where.status = filters.status;
       }
-      // Filter by user email
-      let userIdFilter = null;
+
       if (filters.user) {
-        const filterUser = await prisma.user.findUnique({ where: { email: filters.user } });
-        if (filterUser) {
-          userIdFilter = filterUser.id;
-          whereClauses.push({ upload: { userId: userIdFilter } });
-        }
+        // Filter by user email through the Upload -> User relation
+        where.upload = { is: { user: { is: { email: filters.user } } } };
       }
-      // Compose where clause (AND across each filter)
-      const where = whereClauses.length > 0 ? { AND: whereClauses } : {};
-      // Find jobs to delete
+
+      // Find jobs (with uploads) to delete
       const jobsToDelete = await prisma.job.findMany({ where, include: { upload: true } });
+
+      // Best-effort: remove any local files if present (no-op on Blobs setups)
       for (const job of jobsToDelete) {
-        // Delete output file if exists
-        if (job.outputBlobKey) {
-          const outputPath = path.join(uploadsDir, job.outputBlobKey);
-          if (fs.existsSync(outputPath)) {
-            fs.unlinkSync(outputPath);
+        try {
+          if (job.outputBlobKey) {
+            const outputPath = path.join(uploadsDir, job.outputBlobKey);
+            if (uploadsDir && fs.existsSync(uploadsDir) && fs.existsSync(outputPath)) {
+              fs.unlinkSync(outputPath);
+            }
           }
-        }
-        // Delete upload file
-        if (job.upload && job.upload.blobKey) {
-          const uploadPath = path.join(uploadsDir, job.upload.blobKey);
-          if (fs.existsSync(uploadPath)) {
-            fs.unlinkSync(uploadPath);
+          if (job.upload?.blobKey) {
+            const uploadPath = path.join(uploadsDir, job.upload.blobKey);
+            if (uploadsDir && fs.existsSync(uploadsDir) && fs.existsSync(uploadPath)) {
+              fs.unlinkSync(uploadPath);
+            }
           }
+        } catch (_) {
+          // ignore file deletion errors
         }
       }
-      // Delete jobs and their uploads from DB
+
       const jobIds = jobsToDelete.map((j) => j.id);
-      await prisma.job.deleteMany({ where: { id: { in: jobIds } } });
-      const uploadIds = jobsToDelete.map((j) => j.uploadId);
-      await prisma.upload.deleteMany({ where: { id: { in: uploadIds } } });
-      return { statusCode: 200, body: JSON.stringify({ deleted: jobIds.length }) };
+      const uploadIds = jobsToDelete.map((j) => j.uploadId).filter(Boolean);
+
+      // Delete in a transaction to keep DB consistent
+      await prisma.$transaction([
+        prisma.job.deleteMany({ where: { id: { in: jobIds } } }),
+        prisma.upload.deleteMany({ where: { id: { in: uploadIds } } }),
+      ]);
+
+      return {
+        statusCode: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deleted: jobIds.length }),
+      };
     } catch (err) {
-      return { statusCode: 400, body: JSON.stringify({ error: err.message }) };
+      return {
+        statusCode: 400,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ error: err?.message || 'Delete failed' }),
+      };
     }
   }
+
   return { statusCode: 405, body: 'Method Not Allowed' };
 };
+
+function safeJsonParse(input) {
+  try {
+    return input ? JSON.parse(input) : null;
+  } catch (_) {
+    return null;
+  }
+}
