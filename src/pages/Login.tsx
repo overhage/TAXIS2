@@ -6,7 +6,7 @@ import React from 'react';
  */
 const LoginPage: React.FC = () => {
   const handleLogin = () => {
-    window.location.href = '/api/login';
+    window.location.href = '/api/auth';
   };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginTop: '4rem' }}>
