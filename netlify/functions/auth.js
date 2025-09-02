@@ -1,9 +1,8 @@
 // netlify/functions/auth.js
 const prisma = require('./utils/prisma');
 const { createSession } = require('./utils/auth');
-const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 
-// Support either var name
+// Support either var name from Netlify env
 const clientId = process.env.GITHUB_CLIENT_ID || process.env.GITHUB_ID;
 const clientSecret = process.env.GITHUB_CLIENT_SECRET || process.env.GITHUB_SECRET;
 
@@ -11,7 +10,6 @@ exports.handler = async function (event) {
   const logAnd500 = (label, errObj) => {
     console.error(label, errObj);
     const msg = typeof errObj === 'string' ? errObj : (errObj && errObj.message) || 'unknown';
-    // Temporary: include short reason in body to speed up debugging
     return { statusCode: 500, body: `Auth error: ${label}: ${msg}` };
   };
 
@@ -30,7 +28,7 @@ exports.handler = async function (event) {
     const url = new URL(event.rawUrl || `${baseUrl}${publicPath}`);
     const code = url.searchParams.get('code');
 
-    // Phase 1: send to GitHub
+    // Phase 1: redirect to GitHub
     if (!code) {
       const authorize = new URL('https://github.com/login/oauth/authorize');
       authorize.searchParams.set('client_id', clientId);
@@ -42,11 +40,12 @@ exports.handler = async function (event) {
     // Phase 2: exchange code
     let tokenRes;
     try {
-      tokenRes = await fetch('https://github.com/login/oauth/access_token', {
+      const r = await fetch('https://github.com/login/oauth/access_token', {
         method: 'POST',
         headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
         body: JSON.stringify({ client_id: clientId, client_secret: clientSecret, code, redirect_uri: callbackUrl }),
-      }).then(r => r.json());
+      });
+      tokenRes = await r.json();
     } catch (e) {
       return logAnd500('token_exchange_fetch_failed', e);
     }
@@ -56,16 +55,17 @@ exports.handler = async function (event) {
     }
 
     const ghHeaders = { Authorization: `Bearer ${tokenRes.access_token}`, 'User-Agent': 'taxis2' };
-    const profile = await fetch('https://api.github.com/user', { headers: ghHeaders }).then(r => r.json());
+    const profile = await (await fetch('https://api.github.com/user', { headers: ghHeaders })).json();
+
     let email = profile.email;
     if (!email) {
-      const emails = await fetch('https://api.github.com/user/emails', { headers: ghHeaders }).then(r => r.json());
+      const emails = await (await fetch('https://api.github.com/user/emails', { headers: ghHeaders })).json();
       const primary = Array.isArray(emails) ? emails.find(e => e.primary && e.verified) : null;
       email = (primary && primary.email) || (Array.isArray(emails) && emails[0] && emails[0].email) || null;
     }
     if (!email) return logAnd500('no_email_from_github', profile);
 
-    // DB write (most common failure if tables are missing or DB unreachable)
+    // Upsert user (DB must be reachable and schema must exist)
     let user;
     try {
       user = await prisma.user.upsert({
@@ -77,7 +77,7 @@ exports.handler = async function (event) {
       return logAnd500('prisma_upsert_failed', e);
     }
 
-    // Session + cookie
+    // Create session + cookie
     let session;
     try {
       session = await createSession(user.id);
@@ -89,16 +89,4 @@ exports.handler = async function (event) {
       `session=${encodeURIComponent(session.token)}:${session.signature}`,
       'Path=/',
       'HttpOnly',
-      'SameSite=Lax',
-      'Secure',
-      `Max-Age=${30 * 24 * 60 * 60}`,
-    ].join('; ');
-
-    return {
-      statusCode: 302,
-      headers: { 'Set-Cookie': cookie, Location: '/dashboard' },
-    };
-  } catch (err) {
-    return logAnd500('unexpected', err);
-  }
-};
+      'SameS
