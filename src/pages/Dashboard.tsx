@@ -82,9 +82,9 @@ const DashboardPage: React.FC = () => {
               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead>
                   <tr>
-                    <th style={{ textAlign: 'left', padding: '0.5rem', borderBottom: '1px solid #e5e7eb' }}>File</th>
+                    <th style={{ textAlign: 'left', padding: '0.5rem', borderBottom: '1px solid #e5e7eb' }}>Upload File</th>
                     <th style={{ textAlign: 'left', padding: '0.5rem', borderBottom: '1px solid #e5e7eb' }}>Status</th>
-                    <th style={{ textAlign: 'left', padding: '0.5rem', borderBottom: '1px solid #e5e7eb' }}>Uploaded</th>
+                    <th style={{ textAlign: 'left', padding: '0.5rem', borderBottom: '1px solid #e5e7eb' }}>Upload Date</th>
                     <th style={{ textAlign: 'left', padding: '0.5rem', borderBottom: '1px solid #e5e7eb' }}>Output</th>
                   </tr>
                 </thead>
@@ -119,8 +119,6 @@ const DashboardPage: React.FC = () => {
                       </tr>
                     );
                   })}
-
-
                 </tbody>
               </table>
             )}
