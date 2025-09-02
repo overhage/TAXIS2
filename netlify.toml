@@ -1,21 +1,26 @@
 [build]
-  command   = "npm run build"
-  publish   = "dist"
-  functions = "netlify/functions"
+command = "npm run build"
+publish = "dist"
+functions = "netlify/functions"
 
-  [build.environment]
-NODE_VERSION = "20" 
 
-[[plugins]]
-package = "@netlify/plugin-nextjs"
+[build.environment]
+# Pin major only so the image picks a valid 20.x
+NODE_VERSION = "20"
 
-[[redirects]]
-  from = "/api/*"
-  to = "/.netlify/functions/:splat"
-  status = 200
-  force = true
+
+# IMPORTANT: ensure there are **no** Next.js plugins below.
+# Remove any [[plugins]] blocks like `@netlify/plugin-nextjs`.
+
 
 [[redirects]]
-  from = "/*"
-  to = "/index.html"
-  status = 200
+from = "/api/*"
+status = 200
+force = true
+to = "/.netlify/functions/:splat"
+
+
+[[redirects]]
+from = "/*"
+status = 200
+to = "/index.html"
