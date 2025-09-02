@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
 import Header from '../components/Header';
+import { useAuth } from '../hooks/useAuth';
 
 interface JobItem {
   id: string;
@@ -16,6 +17,8 @@ interface JobItem {
  * jobs in one panel and provides a second panel for uploading new files.
  */
 const DashboardPage: React.FC = () => {
+  const auth = useAuth() as any;
+  const user = auth?.user ?? auth ?? null;
   const [jobs, setJobs] = useState<JobItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -68,6 +71,14 @@ const DashboardPage: React.FC = () => {
     <div>
       <Header title="User Dashboard" />
       <main style={{ padding: '1rem' }}>
+        {/* Signed-in user banner */}
+        {!authLoading && user && (
+          <div style={{ marginBottom: '1rem', fontSize: '0.95rem' }}>
+            Signed in as <strong>{(user as any)?.name || (user as any)?.email || 'User'}</strong>
+            {(user as any)?.email ? ` (${(user as any).email})` : null}
+          </div>
+        )}
+
         {error && (
           <div style={{ color: '#b91c1c', marginBottom: '1rem' }}>{error}</div>
         )}
