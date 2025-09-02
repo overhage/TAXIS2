@@ -1,20 +1,22 @@
 {
-  "name": "taxis2",
-  "version": "1.0.0",
-  "private": true,
-  "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
-    "preview": "vite preview",
-    "prisma:generate": "prisma generate",
-    "postinstall": "prisma generate"
-  },
-  "engines": {
-    "node": ">=20 <21"
-  },  
-  "packageManager": "npm@10",
+"name": "taxis2",
+"version": "1.0.0",
+"private": true,
+"scripts": {
+"dev": "vite",
+"build": "vite build",
+"preview": "vite preview",
+"typecheck": "tsc --noEmit",
+"prisma:generate": "prisma generate",
+"postinstall": "prisma generate"
+},
+"engines": {
+"node": ">=20 <21"
+},
+"packageManager": "npm@10",
   "dependencies": {
     "@prisma/client": "^5.0.0",
+    "@vitejs/plugin-react": "^5.0.2",
     "openai": "^3.2.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
