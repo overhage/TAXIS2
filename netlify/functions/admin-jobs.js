@@ -1,3 +1,11 @@
+// Netlify Function: admin-jobs
+// Purpose: list/delete jobs for admins. Admin = user.isAdmin OR email in ADMIN_EMAILS
+// This version performs robust email extraction from:
+//  1) your existing getUserFromRequest(event)
+//  2) x-user-email header
+//  3) Authorization: Bearer <JWT> (Netlify Identity/JWT)
+//  4) nf_jwt cookie (Netlify Identity)
+
 const prisma = require('./utils/prisma');
 const { getUserFromRequest } = require('./utils/auth');
 
@@ -17,10 +25,72 @@ function allowOriginHeaders() {
   };
 }
 
+function base64UrlToBase64(s) {
+  if (!s) return '';
+  s = s.replace(/-/g, '+').replace(/_/g, '/');
+  const pad = s.length % 4;
+  if (pad) s += '='.repeat(4 - pad);
+  return s;
+}
+
+function decodeJwtPayload(token) {
+  try {
+    const parts = String(token).split('.');
+    if (parts.length < 2) return null;
+    const b64 = base64UrlToBase64(parts[1]);
+    const json = Buffer.from(b64, 'base64').toString('utf8');
+    return JSON.parse(json);
+  } catch (_) {
+    return null;
+  }
+}
+
+function getCookie(name, cookieHeader) {
+  if (!cookieHeader) return null;
+  const cookies = cookieHeader.split(';').map((c) => c.trim());
+  for (const c of cookies) {
+    const idx = c.indexOf('=');
+    if (idx === -1) continue;
+    const k = c.slice(0, idx);
+    const v = c.slice(idx + 1);
+    if (k === name) return decodeURIComponent(v);
+  }
+  return null;
+}
+
+function extractEmailFromJwt(token) {
+  const payload = decodeJwtPayload(token);
+  if (!payload) return null;
+  return (
+    payload.email ||
+    (Array.isArray(payload.emails) && payload.emails[0]) ||
+    payload['http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress'] ||
+    null
+  );
+}
+
 function resolveEmailFrom(event, user) {
-  const hdr = event.headers || {};
-  const headerEmail = hdr['x-user-email'] || hdr['X-User-Email'] || hdr['x-user'] || hdr['X-User'];
-  return (user && user.email) || headerEmail || '';
+  const hdrs = event.headers || {};
+  const headerEmail = hdrs['x-user-email'] || hdrs['X-User-Email'] || hdrs['x-user'] || hdrs['X-User'];
+  if (user && user.email) return user.email;
+  if (headerEmail) return headerEmail;
+
+  // Authorization: Bearer <jwt>
+  const auth = hdrs.authorization || hdrs.Authorization;
+  if (auth && /^Bearer\s+/i.test(auth)) {
+    const token = auth.replace(/^Bearer\s+/i, '').trim();
+    const email = extractEmailFromJwt(token);
+    if (email) return email;
+  }
+
+  // nf_jwt cookie (Netlify Identity)
+  const cookieJwt = getCookie('nf_jwt', hdrs.cookie || hdrs.Cookie);
+  if (cookieJwt) {
+    const email = extractEmailFromJwt(cookieJwt);
+    if (email) return email;
+  }
+
+  return '';
 }
 
 function isAdminUser(email, user) {
@@ -44,7 +114,7 @@ exports.handler = async function (event) {
       qs: event.queryStringParameters,
     });
 
-    // Resolve user from your existing auth util (cookie/JWT based)
+    // Resolve user via your auth util
     let user = null;
     try {
       user = await getUserFromRequest(event);
@@ -54,6 +124,13 @@ exports.handler = async function (event) {
 
     const email = resolveEmailFrom(event, user);
     const allowed = isAdminUser(email, user);
+
+    console.log('[admin-jobs] auth check', {
+      email: email || '(none)',
+      envAdmins: (process.env.ADMIN_EMAILS || '').split(',').map((s) => s.trim()).filter(Boolean),
+      userIsAdminFlag: Boolean(user && user.isAdmin),
+      allowed,
+    });
 
     if (!allowed) {
       return json(403, { error: 'Forbidden', who: email || '(unknown)' });
