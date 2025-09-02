@@ -18,12 +18,11 @@ included_files = [
 
 [[redirects]]
 from = "/api/*"
+to = "/.netlify/functions/:splat"
 status = 200
 force = true
-to = "/.netlify/functions/:splat"
-
 
 [[redirects]]
 from = "/*"
-status = 200
 to = "/index.html"
+status = 200

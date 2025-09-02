@@ -8,7 +8,6 @@ interface JobItem {
   status: string;
   createdAt: string;
   finishedAt?: string;
-  outputUrl?: string;
 }
 
 /**
@@ -49,21 +48,16 @@ const DashboardPage: React.FC = () => {
     try {
       const formData = new FormData();
       formData.append('file', file);
-      const res = await axios.post('/api/upload', formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data'
-        }
+      await axios.post('/api/upload', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
       });
       // Refresh job list after upload
       const jobsRes = await axios.get('/api/jobs');
       setJobs(jobsRes.data);
       setFile(null);
     } catch (err: any) {
-      if (err.response && err.response.data && err.response.data.error) {
-        setError(err.response.data.error);
-      } else {
-        setError('Upload failed.');
-      }
+      if (err.response?.data?.error) setError(err.response.data.error);
+      else setError('Upload failed.');
     } finally {
       setUploading(false);
     }
@@ -94,24 +88,27 @@ const DashboardPage: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {jobs.map((job) => (
-                    <tr key={job.id}>
-                      <td style={{ padding: '0.5rem', borderBottom: '1px solid #f3f4f6' }}>{job.fileName}</td>
-                      <td style={{ padding: '0.5rem', borderBottom: '1px solid #f3f4f6' }}>{job.status}</td>
-                      <td style={{ padding: '0.5rem', borderBottom: '1px solid #f3f4f6' }}>
-                        {new Date(job.createdAt).toLocaleString('en-US', { timeZone: 'America/Indiana/Indianapolis' })}
-                      </td>
-                      <td style={{ padding: '0.5rem', borderBottom: '1px solid #f3f4f6' }}>
-                        {job.outputUrl ? (
-                          <a href={job.outputUrl} style={{ color: '#2563eb' }} download>
-                            Download
-                          </a>
-                        ) : (
-                          '—'
-                        )}
-                      </td>
-                    </tr>
-                  ))}
+                  {jobs.map((job) => {
+                    const href = `/api/download?job=${encodeURIComponent(job.id)}`;
+                    const canDownload = job.status?.toLowerCase() === 'completed' || job.status?.toLowerCase() === 'finished';
+                    return (
+                      <tr key={job.id}>
+                        <td style={{ padding: '0.5rem', borderBottom: '1px solid #f3f4f6' }}>{job.fileName}</td>
+                        <td style={{ padding: '0.5rem', borderBottom: '1px solid #f3f4f6' }}>{job.status}</td>
+                        <td style={{ padding: '0.5rem', borderBottom: '1px solid #f3f4f6' }}>
+                          {new Date(job.createdAt).toLocaleString('en-US', { timeZone: 'America/Indiana/Indianapolis' })}
+                        </td>
+                        <td style={{ padding: '0.5rem', borderBottom: '1px solid #f3f4f6' }}>
+                          {canDownload ? (
+                            // No `download` attribute here so the server's Content-Disposition controls filename
+                            <a href={href} style={{ color: '#2563eb' }}>Download CSV</a>
+                          ) : (
+                            '—'
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             )}
