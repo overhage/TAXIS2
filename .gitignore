@@ -40,3 +40,4 @@ uploads/*
 
 # zips and other local bundles
 *.zip
+public/CONCEPT.csv
