@@ -25,3 +25,15 @@ force = true
 from = "/*"
 to = "/index.html"
 status = 200
+
+[[redirects]]
+  from = "/.netlify/functions/*"
+  to = "/.netlify/functions/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/*"
+  to = "/api/:splat"
+  status = 200
+  force = true
