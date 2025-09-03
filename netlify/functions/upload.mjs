@@ -14,19 +14,16 @@ globalThis.__prisma = prisma;
 const { getUserFromRequest } = authUtilsCjs;
 
 // === EXACT category mapping from rel_dx_classifier_TEXT (1).txt ===
-const RELATIONSHIP_TYPES = {
-  1: 'A causes B',
-  2: 'B causes A',
-  3: 'A indirectly causes B',
-  4: 'B indirectly causes A',
-  5: 'A and B share common cause',
-  6: 'Treatment of A causes B',
-  7: 'Treatment of B causes A',
-  8: 'A and B have similar initial presentations',
-  9: 'A is subset of B',
-  10: 'B is subset of A',
-  11: 'No clear relationship',
-};
+$1
+
+// === Optional type fields (normalized) ===
+const ALLOWED_TYPES = new Set(['condition','procedure','medication','other']);
+function normalizeOptionalType(v) {
+  if (v == null) return null;
+  const s = String(v).trim().toLowerCase();
+  return ALLOWED_TYPES.has(s) ? s : (s ? 'other' : null);
+}
+
 
 // === MODEL SELECTION with robust fallbacks ===
 const PRIMARY_MODEL = process.env.OPENAI_API_MODEL || 'gpt-4o-mini';
@@ -258,11 +255,9 @@ export default async (req) => {
       i += 1;
 
       // Normalize identifiers used to key the MasterRecord
-      const system_a = String(row.system_a ?? '').trim();
-      const system_b = String(row.system_b ?? '').trim();
-      const code_a = String(row.code_a ?? row.concept_a ?? '').trim();
-      const code_b = String(row.code_b ?? row.concept_b ?? '').trim();
-      const pairId = makePairId({ system_a, code_a, system_b, code_b });
+      $1const typeA = normalizeOptionalType(row.type_a);
+      const typeB = normalizeOptionalType(row.type_b);
+      $2makePairId({ system_a, code_a, system_b, code_b });
 
       // Fetch any existing MasterRecord by unique pairId (fallback to findFirst)
       let existing = null;
@@ -298,7 +293,10 @@ export default async (req) => {
             concept_a: row.concept_a ?? null,
             concept_b: row.concept_b ?? null,
             concept_a_t: row.concept_a_t ?? null,
-            concept_b_t: row.concept_b_t ?? null,
+            $1
+            // optional type fields
+            type_a: (typeof typeA === 'string' ? typeA : null),
+            type_b: (typeof typeB === 'string' ? typeB : null),
 
             // relationship fields
             relationship_type: relType, // text
@@ -334,8 +332,8 @@ export default async (req) => {
       }
 
       // Enrich output row
-      enriched.push({
-        ...row,
+      $1        type_a: (typeof typeA === 'string' ? typeA : ''),
+        type_b: (typeof typeB === 'string' ? typeB : ''),
         relationship_type: relType,
         relationship_code: String(relCode),
         rationale,
