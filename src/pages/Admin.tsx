@@ -4,7 +4,37 @@ import React, { useEffect, useMemo, useState } from 'react';
 import Header from '../components/Header';
 import { useAuth } from '../hooks/useAuth';
 
+// ===== Helpers =====
 const fmtDate = (d?: string | null) => (d ? new Date(d).toLocaleString('en-US', { timeZone: 'America/Indiana/Indianapolis' }) : '—');
+
+async function fetchJson(url: string, init?: RequestInit) {
+  const res = await fetch(url, { cache: 'no-store', ...init });
+  const ct = (res.headers.get('content-type') || '').toLowerCase();
+  if (!ct.includes('application/json')) {
+    const text = await res.text().catch(() => '');
+    throw new Error(
+      `Expected JSON but got ${res.status} ${res.statusText} (${ct}). First 300 chars: \n` +
+        text.slice(0, 300)
+    );
+  }
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error || res.statusText);
+  return data;
+}
+
+// Try multiple endpoints until one returns valid JSON
+async function fetchJsonFirst(urls: string[], init?: RequestInit) {
+  const errors: string[] = [];
+  for (const u of urls) {
+    try {
+      const data = await fetchJson(u, init);
+      return { data, usedUrl: u };
+    } catch (e: any) {
+      errors.push(`${u}: ${e?.message || e}`);
+    }
+  }
+  throw new Error('All candidate endpoints failed.\n' + errors.join('\n'));
+}
 
 function AdminMasterRecordSection() {
   const [summary, setSummary] = useState<{ rows: number; lastUpdated: string | null }>({ rows: 0, lastUpdated: null });
@@ -18,9 +48,7 @@ function AdminMasterRecordSection() {
     setRefreshing(true);
     setErr('');
     try {
-      const res = await fetch('/api/admin-master-record?op=summary', { credentials: 'include' });
-      const j = await res.json();
-      if (!res.ok) throw new Error(j?.error || 'Failed to load summary');
+      const j = await fetchJson('/api/admin-master-record?op=summary', { credentials: 'include' });
       const last = j.lastUpdated ? new Date(j.lastUpdated).toISOString() : null;
       setSummary({ rows: Number(j.rows || 0), lastUpdated: last });
     } catch (e: any) {
@@ -30,16 +58,16 @@ function AdminMasterRecordSection() {
     }
   };
 
-  useEffect(() => { fetchSummary(); }, []);
+  useEffect(() => {
+    fetchSummary();
+  }, []);
 
   const onSearch = async (e?: React.FormEvent) => {
     e?.preventDefault?.();
     setErr('');
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin-master-record?op=search&q=${encodeURIComponent(q)}&limit=100`, { credentials: 'include' });
-      const j = await res.json();
-      if (!res.ok) throw new Error(j?.error || 'Search failed');
+      const j = await fetchJson(`/api/admin-master-record?op=search&q=${encodeURIComponent(q)}&limit=100`, { credentials: 'include' });
       setResults(j.rows || []);
     } catch (e: any) {
       setErr(String(e?.message || e));
@@ -132,6 +160,14 @@ function AdminLLMCacheSection() {
   const [err, setErr] = useState('');
   const [jobId, setJobId] = useState('');
   const [stats, setStats] = useState<{ calls: number; sumPrompt: number; sumCompletion: number; sumTotal: number; avgPerCall: number } | null>(null);
+  const [llmApiBase, setLlmApiBase] = useState<string>('/api/admin-llm-cache');
+
+  // Candidate endpoints: Next API route, Netlify Function, legacy path
+  const buildLlmUrls = (qs: URLSearchParams) => [
+    `/api/admin-llm-cache?${qs.toString()}`,
+    `/.netlify/functions/admin-llm-cache?${qs.toString()}`,
+    `/api/admin-llmcache?${qs.toString()}`,
+  ];
 
   const fetchTail = async () => {
     setErr('');
@@ -139,13 +175,14 @@ function AdminLLMCacheSection() {
     try {
       const qs = new URLSearchParams({ op: 'tail', n: '5' });
       if (jobId.trim()) qs.set('jobId', jobId.trim());
-      const res = await fetch(`/api/admin-llmcache?${qs.toString()}`, { credentials: 'include' });
-      const j = await res.json();
-      if (!res.ok) throw new Error(j?.error || 'Failed to load LLM cache');
+      const { data: j, usedUrl } = await fetchJsonFirst(buildLlmUrls(qs), { credentials: 'include' });
+      setLlmApiBase(usedUrl.split('?')[0]);
       setRows(j.rows || []);
       setCols(j.columns || (j.rows?.length ? Object.keys(j.rows[0]) : []));
     } catch (e: any) {
       setErr(String(e?.message || e));
+      setRows([]);
+      setCols([]);
     } finally {
       setLoading(false);
     }
@@ -155,23 +192,26 @@ function AdminLLMCacheSection() {
     try {
       const qs = new URLSearchParams({ op: 'stats' });
       if (jobId.trim()) qs.set('jobId', jobId.trim());
-      const res = await fetch(`/api/admin-llmcache?${qs.toString()}`, { credentials: 'include' });
-      const j = await res.json();
-      if (!res.ok) throw new Error(j?.error || 'Failed to load stats');
+      const { data: j, usedUrl } = await fetchJsonFirst(buildLlmUrls(qs), { credentials: 'include' });
+      setLlmApiBase(usedUrl.split('?')[0]);
       const { calls = 0, sumPrompt = 0, sumCompletion = 0, sumTotal = 0, avgPerCall = 0 } = j || {};
       setStats({ calls, sumPrompt, sumCompletion, sumTotal, avgPerCall });
-    } catch (e) {
-      // ignore in UI; will show on demand
+    } catch {
+      // silent — shown on demand or via tail error
     }
   };
 
-  useEffect(() => { fetchTail(); fetchStats(); }, []);
+  useEffect(() => {
+    fetchTail();
+    fetchStats();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const csvHref = useMemo(() => {
     const qs = new URLSearchParams({ op: 'download' });
     if (jobId.trim()) qs.set('jobId', jobId.trim());
-    return `/api/admin-llmcache?${qs.toString()}`;
-  }, [jobId]);
+    return `${llmApiBase}?${qs.toString()}`;
+  }, [jobId, llmApiBase]);
 
   return (
     <section className="border rounded-2xl p-6 bg-white shadow-sm">
@@ -202,7 +242,7 @@ function AdminLLMCacheSection() {
         )}
       </div>
 
-      {err && <div className="mt-3 text-sm text-red-600">{err}</div>}
+      {err && <div className="mt-3 text-sm text-red-600 whitespace-pre-wrap">{err}</div>}
 
       {loading ? (
         <div className="mt-4 text-sm">Loading…</div>
@@ -255,7 +295,7 @@ const AdminPage: React.FC = () => {
     setForbidden(false);
     setWho('');
     try {
-      const res = await fetch('/api/admin-jobs', { credentials: 'include' });
+      const res = await fetch('/api/admin-jobs', { credentials: 'include', cache: 'no-store' });
       if (res.status === 200) {
         const data: AdminJobRow[] = await res.json();
         setJobs(Array.isArray(data) ? data : []);
@@ -274,7 +314,9 @@ const AdminPage: React.FC = () => {
     }
   };
 
-  useEffect(() => { fetchJobs(); }, []);
+  useEffect(() => {
+    fetchJobs();
+  }, []);
 
   const previewDelete = async () => {
     setError(null);
@@ -284,9 +326,7 @@ const AdminPage: React.FC = () => {
       if (deleteFilters.status) qs.set('status', deleteFilters.status);
       if (deleteFilters.user) qs.set('user', deleteFilters.user);
       qs.set('op', 'count');
-      const res = await fetch(`/api/admin-jobs?${qs.toString()}`, { credentials: 'include' });
-      const j = await res.json();
-      if (!res.ok) throw new Error(j?.error || 'Failed to preview delete');
+      const j = await fetchJson(`/api/admin-jobs?${qs.toString()}`, { credentials: 'include' });
       setPreviewCount(Number(j.count || 0));
       setConfirming(true);
     } catch (e: any) {
@@ -329,7 +369,11 @@ const AdminPage: React.FC = () => {
         {forbidden ? (
           <div className="p-3 rounded-md border border-red-300 bg-red-50 text-red-800">
             You do not have admin access.
-            {who ? (<><span> </span>Detected as <strong>{who}</strong>. Ensure your email is in <code>ADMIN_EMAILS</code> and your session includes it.</> ) : null}
+            {who ? (
+              <>
+                <span> </span>Detected as <strong>{who}</strong>. Ensure your email is in <code>ADMIN_EMAILS</code> and your session includes it.
+              </>
+            ) : null}
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-6">
