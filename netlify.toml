@@ -17,22 +17,14 @@ included_files = [
 ]
 
 [[redirects]]
-from = "/api/*"
+from = "/.netlify/functions/*"
 to = "/.netlify/functions/:splat"
 status = 200
-force = true
 
 [[redirects]]
   from = "/admin-llm-cache"
   to = "/.netlify/functions/admin-llm-cache"
   status = 200
-
-
-[[redirects]]
-  from = "/api/*"
-  to = "/api/:splat"
-  status = 200
-  force = true
 
 [[redirects]]
 from = "/*"

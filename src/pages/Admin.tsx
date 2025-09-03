@@ -160,14 +160,14 @@ function AdminLLMCacheSection() {
   const [err, setErr] = useState('');
   const [jobId, setJobId] = useState('');
   const [stats, setStats] = useState<{ calls: number; sumPrompt: number; sumCompletion: number; sumTotal: number; avgPerCall: number } | null>(null);
-  const [llmApiBase, setLlmApiBase] = useState<string>('/api/admin-llm-cache');
-
-  // Candidate endpoints: Next API route, Netlify Function, legacy path
+  const [llmApiBase, setLlmApiBase] = useState<string>('/.netlify/functions/admin-llm-cache');
+  
+// Candidate endpoints: Netlify Function (canonical), pretty redirect (optional), then any /api proxies
 const buildLlmUrls = (qs: URLSearchParams) => [
-  `/admin-llm-cache?${qs.toString()}`,              // pretty path
-  `/.netlify/functions/admin-llm-cache?${qs}`,      // built-in
-  `/api/admin-llm-cache?${qs}`,                     // Next API (if you add one later)
-  `/api/admin-llmcache?${qs}`,                      // legacy fallback
+  `/.netlify/functions/admin-llm-cache?${qs}`, // canonical on Netlify
+  `/admin-llm-cache?${qs.toString()}`,         // pretty path (works if redirect/config is present)
+  `/api/admin-llm-cache?${qs}`,                // optional Next API proxy (not currently present)
+  `/api/admin-llmcache?${qs}`,                 // legacy fallback (not present)
 ];
 
   const fetchTail = async () => {
@@ -208,11 +208,12 @@ const buildLlmUrls = (qs: URLSearchParams) => [
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const csvHref = useMemo(() => {
-    const qs = new URLSearchParams({ op: 'download' });
-    if (jobId.trim()) qs.set('jobId', jobId.trim());
-    return `${llmApiBase}?${qs.toString()}`;
-  }, [jobId, llmApiBase]);
+ const csvHref = useMemo(() => {
+ const qs = new URLSearchParams({ op: 'download' });
+ if (jobId.trim()) qs.set('jobId', jobId.trim());
+ const base = llmApiBase || '/.netlify/functions/admin-llm-cache';
+ return `${base}?${qs.toString()}`;
+ }, [jobId, llmApiBase]);
 
   return (
     <section className="border rounded-2xl p-6 bg-white shadow-sm">
