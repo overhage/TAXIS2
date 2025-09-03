@@ -1,31 +1,50 @@
 // netlify/functions/upload.mjs  (Functions v2, ESM)
-// Adds MasterRecord upsert + LLM classification + enriched CSV output
+// Faithful reproduction with careful syntax + additions:
+// - Robust OpenAI model fallback
+// - pairId generation and use
+// - Optional type_a/type_b persisted to MasterRecord and output
+// - Relationship enrichment with LLM or from existing MasterRecord
 
 import { getStore } from '@netlify/blobs';
 import { parse as parseCsv } from 'csv-parse/sync';
 import * as XLSX from 'xlsx';
 
+// If your project initializes Prisma side-effects here, keep this import
+// (ok if unused by name; esbuild will tree-shake harmlessly)
 import prismaCjs from './utils/prisma.js';
 import { PrismaClient } from '@prisma/client';
 import authUtilsCjs from './utils/auth.js';
+
 const prisma = globalThis.__prisma || new PrismaClient();
 // @ts-ignore
 globalThis.__prisma = prisma;
 const { getUserFromRequest } = authUtilsCjs;
 
-// === EXACT category mapping from rel_dx_classifier_TEXT (1).txt ===
-$1
+// === Relationship categories (exact labels) ===
+const RELATIONSHIP_TYPES = {
+  1: 'A causes B',
+  2: 'B causes A',
+  3: 'A indirectly causes B',
+  4: 'B indirectly causes A',
+  5: 'A and B share common cause',
+  6: 'Treatment of A causes B',
+  7: 'Treatment of B causes A',
+  8: 'A and B have similar initial presentations',
+  9: 'A is subset of B',
+  10: 'B is subset of A',
+  11: 'No clear relationship',
+};
 
-// === Optional type fields (normalized) ===
-const ALLOWED_TYPES = new Set(['condition','procedure','medication','other']);
+// === Optional type fields normalization ===
+const ALLOWED_TYPES = new Set(['condition', 'procedure', 'medication', 'other']);
 function normalizeOptionalType(v) {
   if (v == null) return null;
   const s = String(v).trim().toLowerCase();
-  return ALLOWED_TYPES.has(s) ? s : (s ? 'other' : null);
+  if (!s) return null;
+  return ALLOWED_TYPES.has(s) ? s : 'other';
 }
 
-
-// === MODEL SELECTION with robust fallbacks ===
+// === Model selection with robust fallbacks ===
 const PRIMARY_MODEL = process.env.OPENAI_API_MODEL || 'gpt-4o-mini';
 const MODEL_FALLBACKS = [
   PRIMARY_MODEL,
@@ -34,58 +53,47 @@ const MODEL_FALLBACKS = [
   'gpt-4.1-mini',
 ].filter(Boolean);
 
-// === LLM call using EXACT prompt text style from your file ===
+// === LLM call (prompt style preserved) ===
 async function classifyRelationship({ conceptAText, conceptBText, events_ab, events_ab_ae }) {
-  const prompt = `
-    You are an expert diagnostician skilled at identifying clinical relationships between ICD-10-CM diagnosis concepts. 
-    Statistical indicators provided:
-    - events_ab (co-occurrences): ${events_ab}
-    - events_ab_ae (actual-to-expected ratio): ${Number(events_ab_ae ?? 0).toFixed(2)}
-
-    Interpretation guidelines:
-    - ≥ 2.0: Strong statistical evidence; carefully consider relationships.
-    - 1.5–1.99: Moderate evidence; cautious evaluation.
-    - 1.0–1.49: Weak evidence; rely primarily on clinical knowledge.
-    - < 1.0: Minimal evidence; avoid indirect/speculative claims.
-
-    Explicit guidelines to avoid speculation:
-    - Direct causation: Only if explicit and clinically accepted.
-      Example: Pneumonia causes cough.
-
-    - Indirect causation: Only with explicit and named intermediate diagnosis.
-      Example: Pneumonia → sepsis → acute kidney injury.
-
-    - Common cause: Only with clearly documented third diagnosis.
-      Example: Obesity clearly causing both diabetes type 2 and osteoarthritis.
-
-    - Treatment-caused: Only if explicitly well-documented.
-      Example: Chemotherapy for cancer causing nausea.
-
-    - Similar presentations: Only if clinically documented similarity exists.
-
-    - Subset relationship: Explicitly broader or unspecified form.
-
-    If evidence or explicit documentation is lacking, choose category 11 (No clear relationship).
-
-    Classify explicitly the relationship between:
-    - Concept A: ${conceptAText}
-    - Concept B: ${conceptBText}
-
-    Categories:
-    1: A causes B
-    2: B causes A
-    3: A indirectly causes B (explicit intermediate required)
-    4: B indirectly causes A (explicit intermediate required)
-    5: A and B share common cause (explicit third condition required)
-    6: Treatment of A causes B (explicit treatment documentation required)
-    7: Treatment of B causes A (explicit treatment documentation required)
-    8: A and B have similar initial presentations
-    9: A is subset of B
-    10: B is subset of A
-    11: No clear relationship (default)
-
-    Answer exactly as "<number>: <short description>: <concise rationale>".
-  `.trim();
+  const prompt = (
+    `You are an expert diagnostician skilled at identifying clinical relationships between ICD-10-CM diagnosis concepts.\n` +
+    `Statistical indicators provided:\n` +
+    `- events_ab (co-occurrences): ${events_ab}\n` +
+    `- events_ab_ae (actual-to-expected ratio): ${Number(events_ab_ae ?? 0).toFixed(2)}\n\n` +
+    `Interpretation guidelines:\n` +
+    `- ≥ 2.0: Strong statistical evidence; carefully consider relationships.\n` +
+    `- 1.5–1.99: Moderate evidence; cautious evaluation.\n` +
+    `- 1.0–1.49: Weak evidence; rely primarily on clinical knowledge.\n` +
+    `- < 1.0: Minimal evidence; avoid indirect/speculative claims.\n\n` +
+    `Explicit guidelines to avoid speculation:\n` +
+    `- Direct causation: Only if explicit and clinically accepted.\n` +
+    `  Example: Pneumonia causes cough.\n\n` +
+    `- Indirect causation: Only with explicit and named intermediate diagnosis.\n` +
+    `  Example: Pneumonia → sepsis → acute kidney injury.\n\n` +
+    `- Common cause: Only with clearly documented third diagnosis.\n` +
+    `  Example: Obesity clearly causing both diabetes type 2 and osteoarthritis.\n\n` +
+    `- Treatment-caused: Only if explicitly well-documented.\n` +
+    `  Example: Chemotherapy for cancer causing nausea.\n\n` +
+    `- Similar presentations: Only if clinically documented similarity exists.\n\n` +
+    `- Subset relationship: Explicitly broader or unspecified form.\n\n` +
+    `If evidence or explicit documentation is lacking, choose category 11 (No clear relationship).\n\n` +
+    `Classify explicitly the relationship between:\n` +
+    `- Concept A: ${conceptAText}\n` +
+    `- Concept B: ${conceptBText}\n\n` +
+    `Categories:\n` +
+    `1: A causes B\n` +
+    `2: B causes A\n` +
+    `3: A indirectly causes B (explicit intermediate required)\n` +
+    `4: B indirectly causes A (explicit intermediate required)\n` +
+    `5: A and B share common cause (explicit third condition required)\n` +
+    `6: Treatment of A causes B (explicit treatment documentation required)\n` +
+    `7: Treatment of B causes A (explicit treatment documentation required)\n` +
+    `8: A and B have similar initial presentations\n` +
+    `9: A is subset of B\n` +
+    `10: B is subset of A\n` +
+    `11: No clear relationship (default)\n\n` +
+    `Answer exactly as "<number>: <short description>: <concise rationale>".`
+  );
 
   console.log('[LLM] model candidates:', MODEL_FALLBACKS.join(', '));
   console.log('[LLM] pair:', conceptAText, '↔', conceptBText);
@@ -111,7 +119,7 @@ async function classifyRelationship({ conceptAText, conceptBText, events_ab, eve
         const text = await resp.text().catch(() => '');
         console.error('[LLM] HTTP error', resp.status, text);
         lastErrText = text;
-        if (resp.status === 403 || resp.status === 404 || /model_not_found/.test(text)) continue; // try next model
+        if (resp.status === 403 || resp.status === 404 || /model_not_found/.test(text)) continue; // try next
         break; // other error; stop trying
       }
 
@@ -150,7 +158,7 @@ const REQUIRED_COLUMNS = [
 function toCsv(rows, headers) {
   const esc = (v) => {
     const s = String(v ?? '');
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
   };
   const head = headers.join(',');
   const body = rows.map((r) => headers.map((k) => esc(r[k])).join(',')).join('\n');
@@ -162,7 +170,7 @@ function getExt(filename, mime) {
   return '.csv';
 }
 
-// LLM prompt inputs bridges
+// LLM prompt input bridges
 function pickConceptText(row) {
   return {
     a: String(row.concept_a_t ?? row.concept_a ?? '').trim(),
@@ -193,16 +201,25 @@ export default async (req) => {
     const eventLike = { headers: { cookie: req.headers.get('cookie') || '' } };
     const user = await getUserFromRequest(eventLike);
     if (!user) {
-      return new Response(JSON.stringify({ error: 'Not authenticated' }), { status: 401, headers: { 'content-type': 'application/json' } });
+      return new Response(
+        JSON.stringify({ error: 'Not authenticated' }),
+        { status: 401, headers: { 'content-type': 'application/json' } }
+      );
     }
     if (req.method !== 'POST') {
-      return new Response('Method Not Allowed', { status: 405, headers: { 'content-type': 'text/plain; charset=utf-8' } });
+      return new Response(
+        'Method Not Allowed',
+        { status: 405, headers: { 'content-type': 'text/plain; charset=utf-8' } }
+      );
     }
 
     const form = await req.formData();
     const file = form.get('file');
     if (!file || typeof file.arrayBuffer !== 'function') {
-      return new Response(JSON.stringify({ error: 'No file provided' }), { status: 400, headers: { 'content-type': 'application/json' } });
+      return new Response(
+        JSON.stringify({ error: 'No file provided' }),
+        { status: 400, headers: { 'content-type': 'application/json' } }
+      );
     }
     const filename = file.name || 'upload.csv';
     const mimeType = file.type || 'text/csv';
@@ -217,11 +234,17 @@ export default async (req) => {
       const sheet = wb.SheetNames[0];
       rows = XLSX.utils.sheet_to_json(wb.Sheets[sheet], { defval: '' });
     } else {
-      return new Response(JSON.stringify({ error: 'Unsupported file type' }), { status: 400, headers: { 'content-type': 'application/json' } });
+      return new Response(
+        JSON.stringify({ error: 'Unsupported file type' }),
+        { status: 400, headers: { 'content-type': 'application/json' } }
+      );
     }
 
     if (!rows.length) {
-      return new Response(JSON.stringify({ error: 'File contains no data' }), { status: 400, headers: { 'content-type': 'application/json' } });
+      return new Response(
+        JSON.stringify({ error: 'File contains no data' }),
+        { status: 400, headers: { 'content-type': 'application/json' } }
+      );
     }
 
     // Drop completely blank rows
@@ -231,7 +254,10 @@ export default async (req) => {
     const header = Object.keys(rows[0]).map((h) => h.toLowerCase());
     for (const col of REQUIRED_COLUMNS) {
       if (!header.includes(col)) {
-        return new Response(JSON.stringify({ error: `Missing required column: ${col}` }), { status: 400, headers: { 'content-type': 'application/json' } });
+        return new Response(
+          JSON.stringify({ error: `Missing required column: ${col}` }),
+          { status: 400, headers: { 'content-type': 'application/json' } }
+        );
       }
     }
 
@@ -255,9 +281,13 @@ export default async (req) => {
       i += 1;
 
       // Normalize identifiers used to key the MasterRecord
-      $1const typeA = normalizeOptionalType(row.type_a);
-      const typeB = normalizeOptionalType(row.type_b);
-      $2makePairId({ system_a, code_a, system_b, code_b });
+      const system_a = String(row.system_a ?? '').trim();
+      const system_b = String(row.system_b ?? '').trim();
+      const code_a = String(row.code_a ?? row.concept_a ?? '').trim();
+      const code_b = String(row.code_b ?? row.concept_b ?? '').trim();
+      const type_a = normalizeOptionalType(row.type_a);
+      const type_b = normalizeOptionalType(row.type_b);
+      const pairId = makePairId({ system_a, code_a, system_b, code_b });
 
       // Fetch any existing MasterRecord by unique pairId (fallback to findFirst)
       let existing = null;
@@ -267,7 +297,9 @@ export default async (req) => {
         existing = await prisma.masterRecord.findFirst({ where: { pairId } });
       }
 
-      let relCode, relType, rationale;
+      let relCode;
+      let relType;
+      let rationale;
 
       if (!existing) {
         // Build prompt inputs
@@ -284,30 +316,26 @@ export default async (req) => {
         // Insert MasterRecord seeded with upload values
         await prisma.masterRecord.create({
           data: {
-            pairId, // REQUIRED by schema
+            pairId,
             system_a,
             code_a,
             system_b,
             code_b,
-            // copy of key descriptive fields (adjust if your schema differs)
             concept_a: row.concept_a ?? null,
             concept_b: row.concept_b ?? null,
             concept_a_t: row.concept_a_t ?? null,
-            $1
-            // optional type fields
-            type_a: (typeof typeA === 'string' ? typeA : null),
-            type_b: (typeof typeB === 'string' ? typeB : null),
-
+            concept_b_t: row.concept_b_t ?? null,
+            // optional types
+            type_a: typeof type_a === 'string' ? type_a : null,
+            type_b: typeof type_b === 'string' ? type_b : null,
             // relationship fields
-            relationship_type: relType, // text
-            relationship_code: String(relCode), // text
-            rationale: rationale, // long text
-
+            relationship_type: relType,
+            relationship_code: String(relCode),
+            rationale,
             // LLM provenance
             LLM_name: 'OpenAI Chat Completions',
             LLM_version: cls.usedModel || PRIMARY_MODEL,
             LLM_date: new Date(),
-
             // counters / accumulators
             cooc_event_count: Number(row.cooc_event_count ?? 0) || 0,
             source_count: 1,
@@ -323,17 +351,18 @@ export default async (req) => {
         await prisma.masterRecord.update({
           where: existing?.id ? { id: existing.id } : { pairId },
           data: {
-            cooc_event_count:
-              Number(existing?.cooc_event_count || 0) + (Number(row.cooc_event_count ?? 0) || 0),
+            cooc_event_count: Number(existing?.cooc_event_count || 0) + (Number(row.cooc_event_count ?? 0) || 0),
             source_count: Number(existing?.source_count || 0) + 1,
             updatedAt: new Date(),
           },
         });
       }
 
-      // Enrich output row
-      $1        type_a: (typeof typeA === 'string' ? typeA : ''),
-        type_b: (typeof typeB === 'string' ? typeB : ''),
+      // Enrich output row (ensure type_a/type_b columns appear)
+      enriched.push({
+        ...row,
+        type_a: typeof type_a === 'string' ? type_a : '',
+        type_b: typeof type_b === 'string' ? type_b : '',
         relationship_type: relType,
         relationship_code: String(relCode),
         rationale,
