@@ -13,23 +13,31 @@ const prisma = globalThis.__prisma || new PrismaClient();
 globalThis.__prisma = prisma;
 const { getUserFromRequest } = authUtilsCjs;
 
-// === NEW: exact category mapping from rel_dx_classifier_TEXT (1).txt ===
+// === EXACT category mapping from rel_dx_classifier_TEXT (1).txt ===
 const RELATIONSHIP_TYPES = {
-  1: "A causes B",
-  2: "B causes A",
-  3: "A indirectly causes B",
-  4: "B indirectly causes A",
-  5: "A and B share common cause",
-  6: "Treatment of A causes B",
-  7: "Treatment of B causes A",
-  8: "A and B have similar initial presentations",
-  9: "A is subset of B",
-  10: "B is subset of A",
-  11: "No clear relationship",
+  1: 'A causes B',
+  2: 'B causes A',
+  3: 'A indirectly causes B',
+  4: 'B indirectly causes A',
+  5: 'A and B share common cause',
+  6: 'Treatment of A causes B',
+  7: 'Treatment of B causes A',
+  8: 'A and B have similar initial presentations',
+  9: 'A is subset of B',
+  10: 'B is subset of A',
+  11: 'No clear relationship',
 };
 
-// === NEW: LLM call using EXACT prompt text from your file ===
-const DEFAULT_MODEL = process.env.OPENAI_API_MODEL || 'gpt-4-turbo';
+// === MODEL SELECTION with robust fallbacks ===
+const PRIMARY_MODEL = process.env.OPENAI_API_MODEL || 'gpt-4o-mini';
+const MODEL_FALLBACKS = [
+  PRIMARY_MODEL,
+  'gpt-4o-mini',
+  'gpt-4o',
+  'gpt-4.1-mini',
+].filter(Boolean);
+
+// === LLM call using EXACT prompt text style from your file ===
 async function classifyRelationship({ conceptAText, conceptBText, events_ab, events_ab_ae }) {
   const prompt = `
     You are an expert diagnostician skilled at identifying clinical relationships between ICD-10-CM diagnosis concepts. 
@@ -82,61 +90,73 @@ async function classifyRelationship({ conceptAText, conceptBText, events_ab, eve
     Answer exactly as "<number>: <short description>: <concise rationale>".
   `.trim();
 
-  console.log('[LLM] model:', DEFAULT_MODEL);
+  console.log('[LLM] model candidates:', MODEL_FALLBACKS.join(', '));
   console.log('[LLM] pair:', conceptAText, '↔', conceptBText);
-  // (early debugging) log a shortened prompt preview
   console.log('[LLM] prompt preview:', prompt.slice(0, 280), '...');
 
-  const resp = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: DEFAULT_MODEL,
-      temperature: 0,
-      messages: [{ role: 'user', content: prompt }],
-    }),
-  });
+  let lastErrText = '';
+  for (const model of MODEL_FALLBACKS) {
+    try {
+      const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          temperature: 0,
+          messages: [{ role: 'user', content: prompt }],
+        }),
+      });
 
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => '');
-    console.error('[LLM] HTTP error', resp.status, text);
-    return { relCode: 11, relType: RELATIONSHIP_TYPES[11], rationale: 'API error occurred' };
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => '');
+        console.error('[LLM] HTTP error', resp.status, text);
+        lastErrText = text;
+        if (resp.status === 403 || resp.status === 404 || /model_not_found/.test(text)) continue; // try next model
+        break; // other error; stop trying
+      }
+
+      const data = await resp.json();
+      const reply = data?.choices?.[0]?.message?.content?.trim() || '';
+      console.log('[LLM] raw reply:', reply);
+
+      const parts = reply.split(': ');
+      const relCode = parseInt(parts[0]?.trim(), 10);
+      const relType = (parts[1] || '').trim() || RELATIONSHIP_TYPES[relCode] || RELATIONSHIP_TYPES[11];
+      const rationale = (parts.slice(2).join(': ') || '').trim() || '—';
+      const safeCode = Number.isFinite(relCode) ? relCode : 11;
+      return { relCode: safeCode, relType, rationale, usedModel: model };
+    } catch (e) {
+      console.error('[LLM] exception for model', model, e?.message || e);
+      // try next fallback
+    }
   }
 
-  const data = await resp.json();
-  const reply = data?.choices?.[0]?.message?.content?.trim() || '';
-  console.log('[LLM] raw reply:', reply);
-
-  try {
-    const parts = reply.split(': ');
-    const relCode = parseInt(parts[0].trim(), 10);
-    const relType = (parts[1] || '').trim() || RELATIONSHIP_TYPES[relCode] || RELATIONSHIP_TYPES[11];
-    const rationale = (parts.slice(2).join(': ') || '').trim() || '—';
-    const safeCode = Number.isFinite(relCode) ? relCode : 11;
-    return { relCode: safeCode, relType, rationale };
-  } catch (e) {
-    console.warn('[LLM] parse error -> defaulting to 11');
-    return { relCode: 11, relType: RELATIONSHIP_TYPES[11], rationale: 'Unable to parse response' };
-  }
+  console.warn('[LLM] all fallbacks failed. defaulting to 11');
+  return {
+    relCode: 11,
+    relType: RELATIONSHIP_TYPES[11],
+    rationale: lastErrText ? `LLM error: ${lastErrText.slice(0, 200)}` : 'LLM unavailable',
+    usedModel: MODEL_FALLBACKS[0],
+  };
 }
 
-// === existing header check (keep, you can expand later if you like) ===
+// === Required columns (case-insensitive check) ===
 const REQUIRED_COLUMNS = [
-  'concept_a','concept_b','concept_a_t','concept_b_t',
-  'system_a','system_b','cooc_event_count','lift_lower_95','lift_upper_95'
+  'concept_a', 'concept_b', 'concept_a_t', 'concept_b_t',
+  'system_a', 'system_b', 'cooc_event_count', 'lift_lower_95', 'lift_upper_95',
 ];
 
-// helpers
+// === helpers ===
 function toCsv(rows, headers) {
   const esc = (v) => {
     const s = String(v ?? '');
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   const head = headers.join(',');
-  const body = rows.map(r => headers.map(k => esc(r[k])).join(',')).join('\n');
+  const body = rows.map((r) => headers.map((k) => esc(r[k])).join(',')).join('\n');
   return head + '\n' + body + (body ? '\n' : '');
 }
 function getExt(filename, mime) {
@@ -145,7 +165,7 @@ function getExt(filename, mime) {
   return '.csv';
 }
 
-// === NEW: derive inputs the LLM prompt expects, even if column names vary ===
+// LLM prompt inputs bridges
 function pickConceptText(row) {
   return {
     a: String(row.concept_a_t ?? row.concept_a ?? '').trim(),
@@ -153,18 +173,22 @@ function pickConceptText(row) {
   };
 }
 function pickEventsAb(row) {
-  // Prefer event count; fall back to observed persons if present; else 0
   const v = row.cooc_event_count ?? row.events_ab ?? row.cooc_obs ?? 0;
   return Number(v) || 0;
 }
 function pickEventsAe(row) {
-  // Prefer explicit ratio if present; else lift; else midpoint of CI; else 1.0
   if (row.events_ab_ae != null) return Number(row.events_ab_ae) || 1.0;
   if (row.lift != null) return Number(row.lift) || 1.0;
   const lo = Number(row.lift_lower_95 ?? NaN);
   const hi = Number(row.lift_upper_95 ?? NaN);
   if (Number.isFinite(lo) && Number.isFinite(hi)) return (lo + hi) / 2;
   return 1.0;
+}
+
+// Stable, directional pair key required by Prisma schema
+function makePairId({ system_a, code_a, system_b, code_b }) {
+  const norm = (x) => String(x ?? '').trim().toUpperCase();
+  return [norm(system_a), norm(code_a), norm(system_b), norm(code_b)].join('|');
 }
 
 export default async (req) => {
@@ -175,7 +199,7 @@ export default async (req) => {
       return new Response(JSON.stringify({ error: 'Not authenticated' }), { status: 401, headers: { 'content-type': 'application/json' } });
     }
     if (req.method !== 'POST') {
-      return new Response('Method Not Allowed', { status: 405 });
+      return new Response('Method Not Allowed', { status: 405, headers: { 'content-type': 'text/plain; charset=utf-8' } });
     }
 
     const form = await req.formData();
@@ -204,17 +228,17 @@ export default async (req) => {
     }
 
     // Drop completely blank rows
-    rows = rows.filter(r => Object.values(r).some(v => String(v ?? '').trim() !== ''));
+    rows = rows.filter((r) => Object.values(r).some((v) => String(v ?? '').trim() !== ''));
 
-    // Required header check (case-insensitive) — matches your current version
-    const header = Object.keys(rows[0]).map(h => h.toLowerCase());
+    // Required header check (case-insensitive)
+    const header = Object.keys(rows[0]).map((h) => h.toLowerCase());
     for (const col of REQUIRED_COLUMNS) {
       if (!header.includes(col)) {
         return new Response(JSON.stringify({ error: `Missing required column: ${col}` }), { status: 400, headers: { 'content-type': 'application/json' } });
       }
     }
 
-    // ——— NEW: process each pair against MasterRecord ———
+    // ——— Process each pair against MasterRecord ———
     const uploadsStore = getStore('uploads');
     const outputsStore = getStore('outputs');
 
@@ -238,11 +262,15 @@ export default async (req) => {
       const system_b = String(row.system_b ?? '').trim();
       const code_a = String(row.code_a ?? row.concept_a ?? '').trim();
       const code_b = String(row.code_b ?? row.concept_b ?? '').trim();
+      const pairId = makePairId({ system_a, code_a, system_b, code_b });
 
-      // Fetch any existing MasterRecord (adjust field names if your Prisma differs)
-      const existing = await prisma.masterRecord.findFirst({
-        where: { system_a, code_a, system_b, code_b },
-      });
+      // Fetch any existing MasterRecord by unique pairId (fallback to findFirst)
+      let existing = null;
+      try {
+        existing = await prisma.masterRecord.findUnique({ where: { pairId } });
+      } catch {
+        existing = await prisma.masterRecord.findFirst({ where: { pairId } });
+      }
 
       let relCode, relType, rationale;
 
@@ -261,22 +289,25 @@ export default async (req) => {
         // Insert MasterRecord seeded with upload values
         await prisma.masterRecord.create({
           data: {
-            system_a, code_a,
-            system_b, code_b,
-            // copy of key descriptive fields (add/adjust as your schema defines)
+            pairId, // REQUIRED by schema
+            system_a,
+            code_a,
+            system_b,
+            code_b,
+            // copy of key descriptive fields (adjust if your schema differs)
             concept_a: row.concept_a ?? null,
             concept_b: row.concept_b ?? null,
             concept_a_t: row.concept_a_t ?? null,
             concept_b_t: row.concept_b_t ?? null,
 
             // relationship fields
-            relationship_type: relType,                 // text
-            relationship_code: String(relCode),        // text
-            rationale: rationale,                      // long text
+            relationship_type: relType, // text
+            relationship_code: String(relCode), // text
+            rationale: rationale, // long text
 
             // LLM provenance
             LLM_name: 'OpenAI Chat Completions',
-            LLM_version: DEFAULT_MODEL,
+            LLM_version: cls.usedModel || PRIMARY_MODEL,
             LLM_date: new Date(),
 
             // counters / accumulators
@@ -292,10 +323,11 @@ export default async (req) => {
 
         // Accumulate counts + source count
         await prisma.masterRecord.update({
-          where: { id: existing.id },
+          where: existing?.id ? { id: existing.id } : { pairId },
           data: {
-            cooc_event_count: Number(existing.cooc_event_count || 0) + (Number(row.cooc_event_count ?? 0) || 0),
-            source_count: Number(existing.source_count || 0) + 1,
+            cooc_event_count:
+              Number(existing?.cooc_event_count || 0) + (Number(row.cooc_event_count ?? 0) || 0),
+            source_count: Number(existing?.source_count || 0) + 1,
             updatedAt: new Date(),
           },
         });
@@ -316,7 +348,10 @@ export default async (req) => {
 
     // Write enriched CSV
     const outHeaders = Array.from(
-      enriched.reduce((s, r) => { Object.keys(r).forEach(k => s.add(k)); return s; }, new Set())
+      enriched.reduce((s, r) => {
+        Object.keys(r).forEach((k) => s.add(k));
+        return s;
+      }, new Set())
     );
     const outputCsv = toCsv(enriched, outHeaders);
     const outputKey = `${userId}/${stamp}_${base}.enriched.csv`;
@@ -354,16 +389,21 @@ export default async (req) => {
       console.warn('[db] job bookkeeping failed:', e?.message || e);
     }
 
-    return new Response(JSON.stringify({
-      ok: true,
-      message: 'Upload processed and enriched.',
-      inputBlobKey: uploadKey,
-      outputBlobKey: outputKey,
-      rows: rows.length,
-    }), { status: 200, headers: { 'content-type': 'application/json' } });
-
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        message: 'Upload processed and enriched.',
+        inputBlobKey: uploadKey,
+        outputBlobKey: outputKey,
+        rows: rows.length,
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } }
+    );
   } catch (err) {
     console.error(err);
-    return new Response(JSON.stringify({ error: String(err?.message ?? err) }), { status: 500, headers: { 'content-type': 'application/json' } });
+    return new Response(
+      JSON.stringify({ error: String(err?.message ?? err) }),
+      { status: 500, headers: { 'content-type': 'application/json' } }
+    );
   }
 }
