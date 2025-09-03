@@ -163,11 +163,12 @@ function AdminLLMCacheSection() {
   const [llmApiBase, setLlmApiBase] = useState<string>('/api/admin-llm-cache');
 
   // Candidate endpoints: Next API route, Netlify Function, legacy path
-  const buildLlmUrls = (qs: URLSearchParams) => [
-    `/api/admin-llm-cache?${qs.toString()}`,
-    `/.netlify/functions/admin-llm-cache?${qs.toString()}`,
-    `/api/admin-llmcache?${qs.toString()}`,
-  ];
+const buildLlmUrls = (qs: URLSearchParams) => [
+  `/admin-llm-cache?${qs.toString()}`,              // pretty path
+  `/.netlify/functions/admin-llm-cache?${qs}`,      // built-in
+  `/api/admin-llm-cache?${qs}`,                     // Next API (if you add one later)
+  `/api/admin-llmcache?${qs}`,                      // legacy fallback
+];
 
   const fetchTail = async () => {
     setErr('');
