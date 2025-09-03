@@ -210,4 +210,160 @@ export default async (req) => {
     const header = Object.keys(rows[0]).map(h => h.toLowerCase());
     for (const col of REQUIRED_COLUMNS) {
       if (!header.includes(col)) {
-        return new Response(JSON.stringify({ error: `Missing required column: ${col}` }), { status: 400, headers: { 'content-type': 'applicatio
+        return new Response(JSON.stringify({ error: `Missing required column: ${col}` }), { status: 400, headers: { 'content-type': 'application/json' } });
+      }
+    }
+
+    // ——— NEW: process each pair against MasterRecord ———
+    const uploadsStore = getStore('uploads');
+    const outputsStore = getStore('outputs');
+
+    const stamp = Date.now();
+    const base = (filename || 'file').replace(/\.[^./]+$/, '') || 'file';
+    const userId = user.id;
+
+    const uploadKey = `${userId}/${stamp}_${base}${ext}`;
+    await uploadsStore.set(uploadKey, buffer, {
+      contentType: mimeType,
+      metadata: { originalName: filename },
+    });
+
+    const enriched = [];
+    let i = 0;
+    for (const row of rows) {
+      i += 1;
+
+      // Normalize identifiers used to key the MasterRecord
+      const system_a = String(row.system_a ?? '').trim();
+      const system_b = String(row.system_b ?? '').trim();
+      const code_a = String(row.code_a ?? row.concept_a ?? '').trim();
+      const code_b = String(row.code_b ?? row.concept_b ?? '').trim();
+
+      // Fetch any existing MasterRecord (adjust field names if your Prisma differs)
+      const existing = await prisma.masterRecord.findFirst({
+        where: { system_a, code_a, system_b, code_b },
+      });
+
+      let relCode, relType, rationale;
+
+      if (!existing) {
+        // Build prompt inputs
+        const { a: conceptAText, b: conceptBText } = pickConceptText(row);
+        const events_ab = pickEventsAb(row);
+        const events_ab_ae = pickEventsAe(row);
+
+        // Call LLM only when we don't already have a record
+        const cls = await classifyRelationship({ conceptAText, conceptBText, events_ab, events_ab_ae });
+        relCode = cls.relCode;
+        relType = cls.relType;
+        rationale = cls.rationale;
+
+        // Insert MasterRecord seeded with upload values
+        await prisma.masterRecord.create({
+          data: {
+            system_a, code_a,
+            system_b, code_b,
+            // copy of key descriptive fields (add/adjust as your schema defines)
+            concept_a: row.concept_a ?? null,
+            concept_b: row.concept_b ?? null,
+            concept_a_t: row.concept_a_t ?? null,
+            concept_b_t: row.concept_b_t ?? null,
+
+            // relationship fields
+            relationship_type: relType,                 // text
+            relationship_code: String(relCode),        // text
+            rationale: rationale,                      // long text
+
+            // LLM provenance
+            LLM_name: 'OpenAI Chat Completions',
+            LLM_version: DEFAULT_MODEL,
+            LLM_date: new Date(),
+
+            // counters / accumulators
+            cooc_event_count: Number(row.cooc_event_count ?? 0) || 0,
+            source_count: 1,
+          },
+        });
+      } else {
+        // Use stored relationship fields (no LLM call)
+        relCode = Number(existing.relationship_code ?? 11) || 11;
+        relType = String(existing.relationship_type ?? RELATIONSHIP_TYPES[11]);
+        rationale = String(existing.rationale ?? '');
+
+        // Accumulate counts + source count
+        await prisma.masterRecord.update({
+          where: { id: existing.id },
+          data: {
+            cooc_event_count: Number(existing.cooc_event_count || 0) + (Number(row.cooc_event_count ?? 0) || 0),
+            source_count: Number(existing.source_count || 0) + 1,
+            updatedAt: new Date(),
+          },
+        });
+      }
+
+      // Enrich output row
+      enriched.push({
+        ...row,
+        relationship_type: relType,
+        relationship_code: String(relCode),
+        rationale,
+      });
+
+      if (i === 1 || i % 10 === 0 || i === rows.length) {
+        console.log(`[progress] processed ${i}/${rows.length}`);
+      }
+    }
+
+    // Write enriched CSV
+    const outHeaders = Array.from(
+      enriched.reduce((s, r) => { Object.keys(r).forEach(k => s.add(k)); return s; }, new Set())
+    );
+    const outputCsv = toCsv(enriched, outHeaders);
+    const outputKey = `${userId}/${stamp}_${base}.enriched.csv`;
+
+    await outputsStore.set(outputKey, Buffer.from(outputCsv), {
+      contentType: 'text/csv',
+      metadata: { source: uploadKey },
+    });
+
+    // Minimal DB bookkeeping
+    try {
+      const uploadRecord = await prisma.upload.create({
+        data: {
+          userId,
+          blobKey: uploadKey,
+          originalName: filename,
+          store: 'blob',
+          contentType: mimeType,
+          size: buffer.length,
+        },
+      });
+      await prisma.job.create({
+        data: {
+          uploadId: uploadRecord.id,
+          status: 'completed',
+          rowsTotal: rows.length,
+          rowsProcessed: rows.length,
+          userId,
+          outputBlobKey: outputKey,
+          createdAt: new Date(),
+          finishedAt: new Date(),
+        },
+      });
+    } catch (e) {
+      console.warn('[db] job bookkeeping failed:', e?.message || e);
+    }
+
+    return new Response(JSON.stringify({
+      ok: true,
+      message: 'Upload processed and enriched.',
+      inputBlobKey: uploadKey,
+      outputBlobKey: outputKey,
+      rows: rows.length,
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+
+  } catch (err) {
+    console.error(err);
+    return new Response(JSON.stringify({ error: String(err?.message ?? err) }), { status: 500, headers: { 'content-type': 'application/json' } });
+  }
+}
