@@ -1,16 +1,16 @@
 // netlify/functions/upload.mjs  (Functions v2, ESM)
-// Faithful reproduction with careful syntax + additions:
-// - Robust OpenAI model fallback
-// - pairId generation and use
-// - Optional type_a/type_b persisted to MasterRecord and output
-// - Relationship enrichment with LLM or from existing MasterRecord
+// Faithful uploader with schema-aligned fields
+// - OpenAI fallback chain
+// - pairId generation and use (@id in Prisma)
+// - Optional type_a/type_b persisted
+// - Relationship enrichment via LLM or existing MasterRecord
+// - Field names aligned to Prisma schema: relationshipType, relationshipCode, rational, llm_*
 
 import { getStore } from '@netlify/blobs';
 import { parse as parseCsv } from 'csv-parse/sync';
 import * as XLSX from 'xlsx';
 
-// If your project initializes Prisma side-effects here, keep this import
-// (ok if unused by name; esbuild will tree-shake harmlessly)
+// Project-side Prisma initialization
 import prismaCjs from './utils/prisma.js';
 import { PrismaClient } from '@prisma/client';
 import authUtilsCjs from './utils/auth.js';
@@ -108,11 +108,7 @@ async function classifyRelationship({ conceptAText, conceptBText, events_ab, eve
           authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
           'content-type': 'application/json',
         },
-        body: JSON.stringify({
-          model,
-          temperature: 0,
-          messages: [{ role: 'user', content: prompt }],
-        }),
+        body: JSON.stringify({ model, temperature: 0, messages: [{ role: 'user', content: prompt }] }),
       });
 
       if (!resp.ok) {
@@ -130,9 +126,9 @@ async function classifyRelationship({ conceptAText, conceptBText, events_ab, eve
       const parts = reply.split(': ');
       const relCode = parseInt(parts[0]?.trim(), 10);
       const relType = (parts[1] || '').trim() || RELATIONSHIP_TYPES[relCode] || RELATIONSHIP_TYPES[11];
-      const rationale = (parts.slice(2).join(': ') || '').trim() || '—';
+      const rationalText = (parts.slice(2).join(': ') || '').trim() || '—';
       const safeCode = Number.isFinite(relCode) ? relCode : 11;
-      return { relCode: safeCode, relType, rationale, usedModel: model };
+      return { relCode: safeCode, relType, rationalText, usedModel: model };
     } catch (e) {
       console.error('[LLM] exception for model', model, e?.message || e);
       // try next fallback
@@ -143,7 +139,7 @@ async function classifyRelationship({ conceptAText, conceptBText, events_ab, eve
   return {
     relCode: 11,
     relType: RELATIONSHIP_TYPES[11],
-    rationale: lastErrText ? `LLM error: ${lastErrText.slice(0, 200)}` : 'LLM unavailable',
+    rationalText: lastErrText ? `LLM error: ${lastErrText.slice(0, 200)}` : 'LLM unavailable',
     usedModel: MODEL_FALLBACKS[0],
   };
 }
@@ -169,6 +165,7 @@ function getExt(filename, mime) {
   if (mime && /excel|sheet/i.test(mime)) return '.xlsx';
   return '.csv';
 }
+function numOrZero(v) { const n = Number(v); return Number.isFinite(n) ? n : 0; }
 
 // LLM prompt input bridges
 function pickConceptText(row) {
@@ -201,26 +198,18 @@ export default async (req) => {
     const eventLike = { headers: { cookie: req.headers.get('cookie') || '' } };
     const user = await getUserFromRequest(eventLike);
     if (!user) {
-      return new Response(
-        JSON.stringify({ error: 'Not authenticated' }),
-        { status: 401, headers: { 'content-type': 'application/json' } }
-      );
+      return new Response(JSON.stringify({ error: 'Not authenticated' }), { status: 401, headers: { 'content-type': 'application/json' } });
     }
     if (req.method !== 'POST') {
-      return new Response(
-        'Method Not Allowed',
-        { status: 405, headers: { 'content-type': 'text/plain; charset=utf-8' } }
-      );
+      return new Response('Method Not Allowed', { status: 405, headers: { 'content-type': 'text/plain; charset=utf-8' } });
     }
 
     const form = await req.formData();
     const file = form.get('file');
     if (!file || typeof file.arrayBuffer !== 'function') {
-      return new Response(
-        JSON.stringify({ error: 'No file provided' }),
-        { status: 400, headers: { 'content-type': 'application/json' } }
-      );
+      return new Response(JSON.stringify({ error: 'No file provided' }), { status: 400, headers: { 'content-type': 'application/json' } });
     }
+
     const filename = file.name || 'upload.csv';
     const mimeType = file.type || 'text/csv';
     const buffer = Buffer.from(await file.arrayBuffer());
@@ -234,17 +223,11 @@ export default async (req) => {
       const sheet = wb.SheetNames[0];
       rows = XLSX.utils.sheet_to_json(wb.Sheets[sheet], { defval: '' });
     } else {
-      return new Response(
-        JSON.stringify({ error: 'Unsupported file type' }),
-        { status: 400, headers: { 'content-type': 'application/json' } }
-      );
+      return new Response(JSON.stringify({ error: 'Unsupported file type' }), { status: 400, headers: { 'content-type': 'application/json' } });
     }
 
     if (!rows.length) {
-      return new Response(
-        JSON.stringify({ error: 'File contains no data' }),
-        { status: 400, headers: { 'content-type': 'application/json' } }
-      );
+      return new Response(JSON.stringify({ error: 'File contains no data' }), { status: 400, headers: { 'content-type': 'application/json' } });
     }
 
     // Drop completely blank rows
@@ -254,10 +237,7 @@ export default async (req) => {
     const header = Object.keys(rows[0]).map((h) => h.toLowerCase());
     for (const col of REQUIRED_COLUMNS) {
       if (!header.includes(col)) {
-        return new Response(
-          JSON.stringify({ error: `Missing required column: ${col}` }),
-          { status: 400, headers: { 'content-type': 'application/json' } }
-        );
+        return new Response(JSON.stringify({ error: `Missing required column: ${col}` }), { status: 400, headers: { 'content-type': 'application/json' } });
       }
     }
 
@@ -270,10 +250,7 @@ export default async (req) => {
     const userId = user.id;
 
     const uploadKey = `${userId}/${stamp}_${base}${ext}`;
-    await uploadsStore.set(uploadKey, buffer, {
-      contentType: mimeType,
-      metadata: { originalName: filename },
-    });
+    await uploadsStore.set(uploadKey, buffer, { contentType: mimeType, metadata: { originalName: filename } });
 
     const enriched = [];
     let i = 0;
@@ -289,7 +266,7 @@ export default async (req) => {
       const type_b = normalizeOptionalType(row.type_b);
       const pairId = makePairId({ system_a, code_a, system_b, code_b });
 
-      // Fetch any existing MasterRecord by unique pairId (fallback to findFirst)
+      // Fetch any existing MasterRecord by primary key pairId
       let existing = null;
       try {
         existing = await prisma.masterRecord.findUnique({ where: { pairId } });
@@ -297,9 +274,7 @@ export default async (req) => {
         existing = await prisma.masterRecord.findFirst({ where: { pairId } });
       }
 
-      let relCode;
-      let relType;
-      let rationale;
+      let relCode; let relType; let rationalText;
 
       if (!existing) {
         // Build prompt inputs
@@ -309,63 +284,77 @@ export default async (req) => {
 
         // Call LLM only when we don't already have a record
         const cls = await classifyRelationship({ conceptAText, conceptBText, events_ab, events_ab_ae });
-        relCode = cls.relCode;
-        relType = cls.relType;
-        rationale = cls.rationale;
+        relCode = cls.relCode; relType = cls.relType; rationalText = cls.rationalText;
 
-        // Insert MasterRecord seeded with upload values
+        // Insert MasterRecord seeded with upload values (only required + chosen optional safe ints)
         await prisma.masterRecord.create({
           data: {
             pairId,
-            system_a,
+            // clinical concepts & codes
+            concept_a: row.concept_a ?? String(code_a),
             code_a,
-            system_b,
+            concept_b: row.concept_b ?? String(code_b),
             code_b,
-            concept_a: row.concept_a ?? null,
-            concept_b: row.concept_b ?? null,
-            concept_a_t: row.concept_a_t ?? null,
-            concept_b_t: row.concept_b_t ?? null,
-            // optional types
+            system_a,
+            system_b,
             type_a: typeof type_a === 'string' ? type_a : null,
             type_b: typeof type_b === 'string' ? type_b : null,
-            // relationship fields
-            relationship_type: relType,
-            relationship_code: String(relCode),
-            rationale,
-            // LLM provenance
-            LLM_name: 'OpenAI Chat Completions',
-            LLM_version: cls.usedModel || PRIMARY_MODEL,
-            LLM_date: new Date(),
-            // counters / accumulators
-            cooc_event_count: Number(row.cooc_event_count ?? 0) || 0,
+            // You may also keep concept_a_t / concept_b_t in a different table; not in schema, so omitted
+
+            // relationship fields (schema-aligned)
+            relationshipType: relType,
+            relationshipCode: Number(relCode),
+            rational: rationalText,
+
+            // LLM provenance (schema-aligned)
+            llm_name: 'OpenAI Chat Completions',
+            llm_version: cls.usedModel || PRIMARY_MODEL,
+            llm_date: new Date(),
+
+            // counters (required)
+            cooc_event_count: numOrZero(row.cooc_event_count),
             source_count: 1,
+
+            // OPTIONAL: accumulate-safe counts if present (nullable in schema)
+            cooc_obs: row.cooc_obs == null ? null : numOrZero(row.cooc_obs),
+            nA: row.nA == null ? null : numOrZero(row.nA),
+            nB: row.nB == null ? null : numOrZero(row.nB),
+            total_persons: row.total_persons == null ? null : numOrZero(row.total_persons),
+            a_before_b: row.a_before_b == null ? null : numOrZero(row.a_before_b),
+            b_before_a: row.b_before_a == null ? null : numOrZero(row.b_before_a),
           },
         });
       } else {
         // Use stored relationship fields (no LLM call)
-        relCode = Number(existing.relationship_code ?? 11) || 11;
-        relType = String(existing.relationship_type ?? RELATIONSHIP_TYPES[11]);
-        rationale = String(existing.rationale ?? '');
+        relCode = Number(existing.relationshipCode ?? 11) || 11;
+        relType = String(existing.relationshipType ?? RELATIONSHIP_TYPES[11]);
+        rationalText = String(existing.rational ?? '');
 
-        // Accumulate counts + source count
+        // Accumulate counts + source count (safe if some are null)
         await prisma.masterRecord.update({
           where: existing?.id ? { id: existing.id } : { pairId },
           data: {
-            cooc_event_count: Number(existing?.cooc_event_count || 0) + (Number(row.cooc_event_count ?? 0) || 0),
-            source_count: Number(existing?.source_count || 0) + 1,
-            updatedAt: new Date(),
+            cooc_event_count: numOrZero(existing?.cooc_event_count) + numOrZero(row.cooc_event_count),
+            source_count: numOrZero(existing?.source_count) + 1,
+            // optional counts
+            cooc_obs: (existing?.cooc_obs ?? 0) + (row.cooc_obs == null ? 0 : numOrZero(row.cooc_obs)),
+            nA: (existing?.nA ?? 0) + (row.nA == null ? 0 : numOrZero(row.nA)),
+            nB: (existing?.nB ?? 0) + (row.nB == null ? 0 : numOrZero(row.nB)),
+            total_persons: (existing?.total_persons ?? 0) + (row.total_persons == null ? 0 : numOrZero(row.total_persons)),
+            a_before_b: (existing?.a_before_b ?? 0) + (row.a_before_b == null ? 0 : numOrZero(row.a_before_b)),
+            b_before_a: (existing?.b_before_a ?? 0) + (row.b_before_a == null ? 0 : numOrZero(row.b_before_a)),
           },
         });
       }
 
-      // Enrich output row (ensure type_a/type_b columns appear)
+      // Enrich output row (use the names you asked for in file output)
       enriched.push({
         ...row,
         type_a: typeof type_a === 'string' ? type_a : '',
         type_b: typeof type_b === 'string' ? type_b : '',
         relationship_type: relType,
         relationship_code: String(relCode),
-        rationale,
+        rational: rationalText,
       });
 
       if (i === 1 || i % 10 === 0 || i === rows.length) {
@@ -375,62 +364,28 @@ export default async (req) => {
 
     // Write enriched CSV
     const outHeaders = Array.from(
-      enriched.reduce((s, r) => {
-        Object.keys(r).forEach((k) => s.add(k));
-        return s;
-      }, new Set())
+      enriched.reduce((s, r) => { Object.keys(r).forEach((k) => s.add(k)); return s; }, new Set())
     );
     const outputCsv = toCsv(enriched, outHeaders);
     const outputKey = `${userId}/${stamp}_${base}.enriched.csv`;
 
-    await outputsStore.set(outputKey, Buffer.from(outputCsv), {
-      contentType: 'text/csv',
-      metadata: { source: uploadKey },
-    });
+    await outputsStore.set(outputKey, Buffer.from(outputCsv), { contentType: 'text/csv', metadata: { source: uploadKey } });
 
     // Minimal DB bookkeeping
     try {
       const uploadRecord = await prisma.upload.create({
-        data: {
-          userId,
-          blobKey: uploadKey,
-          originalName: filename,
-          store: 'blob',
-          contentType: mimeType,
-          size: buffer.length,
-        },
+        data: { userId, blobKey: uploadKey, originalName: filename, store: 'blob', contentType: mimeType, size: buffer.length },
       });
       await prisma.job.create({
-        data: {
-          uploadId: uploadRecord.id,
-          status: 'completed',
-          rowsTotal: rows.length,
-          rowsProcessed: rows.length,
-          userId,
-          outputBlobKey: outputKey,
-          createdAt: new Date(),
-          finishedAt: new Date(),
-        },
+        data: { uploadId: uploadRecord.id, status: 'completed', rowsTotal: rows.length, rowsProcessed: rows.length, userId, outputBlobKey: outputKey, createdAt: new Date(), finishedAt: new Date() },
       });
     } catch (e) {
       console.warn('[db] job bookkeeping failed:', e?.message || e);
     }
 
-    return new Response(
-      JSON.stringify({
-        ok: true,
-        message: 'Upload processed and enriched.',
-        inputBlobKey: uploadKey,
-        outputBlobKey: outputKey,
-        rows: rows.length,
-      }),
-      { status: 200, headers: { 'content-type': 'application/json' } }
-    );
+    return new Response(JSON.stringify({ ok: true, message: 'Upload processed and enriched.', inputBlobKey: uploadKey, outputBlobKey: outputKey, rows: rows.length }), { status: 200, headers: { 'content-type': 'application/json' } });
   } catch (err) {
     console.error(err);
-    return new Response(
-      JSON.stringify({ error: String(err?.message ?? err) }),
-      { status: 500, headers: { 'content-type': 'application/json' } }
-    );
+    return new Response(JSON.stringify({ error: String(err?.message ?? err) }), { status: 500, headers: { 'content-type': 'application/json' } });
   }
 }

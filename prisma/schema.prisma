@@ -75,6 +75,15 @@ model Job {
   User          User?     @relation(fields: [userId], references: [id])
 }
 
+// prisma/schema.prisma
+// MasterRecord updated so ONLY these are required:
+//   pairId, concept_a, code_a, system_a, concept_b, code_b, system_b,
+//   relationshipType, relationshipCode, rational,
+//   source_count, llm_date?, llm_name?, llm_version?,
+//   cooc_event_count, createdAt, updatedAt
+// Everything else is nullable for now.
+// NOTE: field names preserved as in your provided model (camelCase where present).
+
 model MasterRecord {
   // Identifier for a pair of concepts
   pairId String @id
@@ -86,55 +95,55 @@ model MasterRecord {
   code_b    String @db.VarChar(20)
   system_a  String @db.VarChar(12)
   system_b  String @db.VarChar(12)
-  type_a    String @db.VarChar(20)
-  type_b    String @db.VarChar(20)
+  type_a    String? @db.VarChar(20)   // optional
+  type_b    String? @db.VarChar(20)   // optional
 
   // Counts & frequencies
-  cooc_obs         Int
-  nA               Int
-  nB               Int
-  total_persons    Int
-  cooc_event_count Int
-  a_before_b       Int
-  b_before_a       Int
+  cooc_obs         Int?   // optional
+  nA               Int?   // optional
+  nB               Int?   // optional
+  total_persons    Int?   // optional
+  cooc_event_count Int     // REQUIRED
+  a_before_b       Int?   // optional
+  b_before_a       Int?   // optional
 
-  // Statistical measures (fixed precision)
-  expected_obs           Decimal @db.Decimal(19, 2)
-  lift                   Decimal @db.Decimal(19, 4)
-  lift_lower_95          Decimal @db.Decimal(19, 4)
-  lift_upper_95          Decimal @db.Decimal(19, 4)
-  z_score                Decimal @db.Decimal(19, 4)
-  ab_h                   Decimal @db.Decimal(19, 2)
-  a_only_h               Decimal @db.Decimal(19, 2)
-  b_only_h               Decimal @db.Decimal(19, 2)
-  neither_h              Decimal @db.Decimal(19, 2)
-  odds_ratio             Decimal @db.Decimal(19, 4)
-  or_lower_95            Decimal @db.Decimal(19, 4)
-  or_upper_95            Decimal @db.Decimal(19, 4)
-  directionality_ratio   Decimal @db.Decimal(19, 4)
-  dir_prop_a_before_b    Decimal @db.Decimal(19, 4)
-  dir_lower_95           Decimal @db.Decimal(19, 4)
-  dir_upper_95           Decimal @db.Decimal(19, 4)
-  confidence_a_to_b      Decimal @db.Decimal(19, 4)
-  confidence_b_to_a      Decimal @db.Decimal(19, 4)
+  // Statistical measures (now optional)
+  expected_obs           Decimal? @db.Decimal(19, 2)
+  lift                   Decimal? @db.Decimal(19, 4)
+  lift_lower_95          Decimal? @db.Decimal(19, 4)
+  lift_upper_95          Decimal? @db.Decimal(19, 4)
+  z_score                Decimal? @db.Decimal(19, 4)
+  ab_h                   Decimal? @db.Decimal(19, 2)
+  a_only_h               Decimal? @db.Decimal(19, 2)
+  b_only_h               Decimal? @db.Decimal(19, 2)
+  neither_h              Decimal? @db.Decimal(19, 2)
+  odds_ratio             Decimal? @db.Decimal(19, 4)
+  or_lower_95            Decimal? @db.Decimal(19, 4)
+  or_upper_95            Decimal? @db.Decimal(19, 4)
+  directionality_ratio   Decimal? @db.Decimal(19, 4)
+  dir_prop_a_before_b    Decimal? @db.Decimal(19, 4)
+  dir_lower_95           Decimal? @db.Decimal(19, 4)
+  dir_upper_95           Decimal? @db.Decimal(19, 4)
+  confidence_a_to_b      Decimal? @db.Decimal(19, 4)
+  confidence_b_to_a      Decimal? @db.Decimal(19, 4)
 
-  // Relationship fields
+  // Relationship fields (REQUIRED)
   relationshipType String @db.VarChar(64)
   relationshipCode Int
   rational         String @db.VarChar(1024)
 
   // Metadata
-  source_count     Int
-  llm_date         DateTime?
-  llm_name         String?  @db.VarChar(100)
-  llm_version      String?  @db.VarChar(50)
-  human_date       DateTime?
-  human_reviewer   String?  @db.VarChar(254)
-  human_comment    String?  @db.VarChar(255)
-  status           String   @db.VarChar(12)
+  source_count Int
+  llm_date     DateTime?
+  llm_name     String?  @db.VarChar(100)
+  llm_version  String?  @db.VarChar(50)
+  human_date   DateTime?
+  human_reviewer String?  @db.VarChar(254)
+  human_comment  String?  @db.VarChar(255)
+  status         String?  @db.VarChar(12)  // optional for now
 
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   @@index([code_a, system_a])
   @@index([code_b, system_b])
