@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import Header from '../components/Header';
 import { useAuth } from '../hooks/useAuth';
@@ -14,7 +14,6 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { has
     return { hasError: true, msg: String(error?.message || error) };
   }
   componentDidCatch(error: any, info: any) {
-    // Surface to console so we don't get a silent blank page
     console.error('[Dashboard ErrorBoundary]', error, info);
   }
   render() {
@@ -36,11 +35,13 @@ interface JobItem {
   status: string;
   createdAt: string;
   finishedAt?: string;
-  outputBlobKey?: string; // optional, used to label the download link
+  outputBlobKey?: string;
 }
 
+const POLL_INTERVAL_MS = 10_000; // 10 seconds
+const LS_KEY = 'dashboard.autoRefresh';
+
 const DashboardPage: React.FC = () => {
-  // Be resilient to different useAuth() return shapes
   const auth = useAuth() as any;
   const user = auth?.user ?? auth ?? null;
 
@@ -50,25 +51,67 @@ const DashboardPage: React.FC = () => {
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
 
+  const [autoRefresh, setAutoRefresh] = useState<boolean>(() => {
+    const raw = typeof window !== 'undefined' ? window.localStorage.getItem(LS_KEY) : null;
+    if (raw === 'true') return true;
+    if (raw === 'false') return false;
+    return true; // default ON
+  });
+  const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  const pollRef = useRef<number | null>(null);
+
+  const fetchJobs = async () => {
+    try {
+      const res = await axios.get('/api/jobs', { withCredentials: true });
+      setJobs(Array.isArray(res.data) ? res.data : []);
+      setLastRefresh(new Date());
+      setError(null);
+    } catch (err: any) {
+      console.error('[Dashboard] jobs fetch failed', err);
+      setError(err?.response?.data?.error || 'Failed to fetch jobs.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Initial fetch
   useEffect(() => {
     let cancelled = false;
-    async function fetchJobs() {
+    (async () => {
       try {
-        console.log('[Dashboard] fetching jobs');
-        const res = await axios.get('/api/jobs', { withCredentials: true });
-        if (!cancelled) setJobs(Array.isArray(res.data) ? res.data : []);
-      } catch (err: any) {
-        console.error('[Dashboard] jobs fetch failed', err);
-        if (!cancelled) setError(err?.response?.data?.error || 'Failed to fetch jobs.');
+        await fetchJobs();
       } finally {
         if (!cancelled) setIsLoading(false);
       }
-    }
-    fetchJobs();
-    return () => {
-      cancelled = true;
-    };
+    })();
+    return () => { cancelled = true; };
   }, []);
+
+  // Auto-refresh polling
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    // persist preference
+    try { window.localStorage.setItem(LS_KEY, String(autoRefresh)); } catch {}
+
+    // clear any existing interval
+    if (pollRef.current) {
+      window.clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+
+    if (autoRefresh) {
+      // kick once immediately for snappy UX
+      fetchJobs();
+      pollRef.current = window.setInterval(fetchJobs, POLL_INTERVAL_MS) as any;
+    }
+
+    return () => {
+      if (pollRef.current) {
+        window.clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, [autoRefresh]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) setFile(e.target.files[0]);
@@ -85,10 +128,8 @@ const DashboardPage: React.FC = () => {
         headers: { 'Content-Type': 'multipart/form-data' },
         withCredentials: true,
       });
-      // Refresh job list after upload
-      const jobsRes = await axios.get('/api/jobs', { withCredentials: true });
-      setJobs(Array.isArray(jobsRes.data) ? jobsRes.data : []);
       setFile(null);
+      await fetchJobs(); // refresh right after upload
     } catch (err: any) {
       console.error('[Dashboard] upload failed', err);
       setError(err?.response?.data?.error || 'Upload failed.');
@@ -97,12 +138,13 @@ const DashboardPage: React.FC = () => {
     }
   };
 
+  const refreshLabel = lastRefresh ? `Last updated ${lastRefresh.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}` : 'Not updated yet';
+
   return (
     <ErrorBoundary>
       <div>
         <Header title="User Dashboard" />
         <main style={{ padding: '1rem' }}>
-          {/* Signed-in user banner */}
           {user && (
             <div style={{ marginBottom: '1rem', fontSize: '0.95rem' }}>
               Signed in as <strong>{user?.name || user?.email || 'User'}</strong>
@@ -116,7 +158,27 @@ const DashboardPage: React.FC = () => {
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem' }}>
             <section>
-              <h2 style={{ fontSize: '1.25rem', marginBottom: '0.5rem' }}>Your Jobs</h2>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem' }}>
+                <h2 style={{ fontSize: '1.25rem', marginBottom: '0.5rem' }}>Your Jobs</h2>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem' }}>
+                    <input
+                      type="checkbox"
+                      checked={autoRefresh}
+                      onChange={(e) => setAutoRefresh(e.target.checked)}
+                    />
+                    Auto refresh every 10s
+                  </label>
+                  <button
+                    onClick={() => fetchJobs()}
+                    style={{ padding: '0.35rem 0.75rem', border: '1px solid #e5e7eb', borderRadius: 6, background: '#fff' }}
+                  >
+                    Refresh now
+                  </button>
+                </div>
+              </div>
+              <div style={{ fontSize: '0.8rem', color: '#6b7280', marginBottom: '0.5rem' }}>{refreshLabel}</div>
+
               {isLoading ? (
                 <p>Loading jobs…</p>
               ) : jobs.length === 0 ? (

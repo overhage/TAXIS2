@@ -4,17 +4,6 @@ import React, { useEffect, useMemo, useState } from 'react';
 import Header from '../components/Header';
 import { useAuth } from '../hooks/useAuth';
 
-interface AdminJobRow {
-  id: string;
-  fileName: string;
-  userEmail?: string;
-  rowCount?: number;
-  createdAt: string;
-  status: string;
-  outputUrl?: string;
-}
-
-// ——— MasterRecord Admin Section ———
 const fmtDate = (d?: string | null) => (d ? new Date(d).toLocaleString('en-US', { timeZone: 'America/Indiana/Indianapolis' }) : '—');
 
 function AdminMasterRecordSection() {
@@ -23,22 +12,25 @@ function AdminMasterRecordSection() {
   const [results, setResults] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState('');
+  const [refreshing, setRefreshing] = useState(false);
 
-  useEffect(() => {
-    let active = true;
-    (async () => {
-      try {
-        const res = await fetch('/api/admin-master-record?op=summary', { credentials: 'include' });
-        const j = await res.json();
-        if (!active) return;
-        if (!res.ok) throw new Error(j?.error || 'Failed to load summary');
-        setSummary({ rows: j.rows || 0, lastUpdated: j.lastUpdated || null });
-      } catch (e: any) {
-        if (active) setErr(String(e?.message || e));
-      }
-    })();
-    return () => { active = false; };
-  }, []);
+  const fetchSummary = async () => {
+    setRefreshing(true);
+    setErr('');
+    try {
+      const res = await fetch('/api/admin-master-record?op=summary', { credentials: 'include' });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j?.error || 'Failed to load summary');
+      const last = j.lastUpdated ? new Date(j.lastUpdated).toISOString() : null;
+      setSummary({ rows: Number(j.rows || 0), lastUpdated: last });
+    } catch (e: any) {
+      setErr(String(e?.message || e));
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => { fetchSummary(); }, []);
 
   const onSearch = async (e?: React.FormEvent) => {
     e?.preventDefault?.();
@@ -48,7 +40,7 @@ function AdminMasterRecordSection() {
       const res = await fetch(`/api/admin-master-record?op=search&q=${encodeURIComponent(q)}&limit=100`, { credentials: 'include' });
       const j = await res.json();
       if (!res.ok) throw new Error(j?.error || 'Search failed');
-      setResults(Array.isArray(j.rows) ? j.rows : []);
+      setResults(j.rows || []);
     } catch (e: any) {
       setErr(String(e?.message || e));
     } finally {
@@ -67,29 +59,15 @@ function AdminMasterRecordSection() {
             {summary.rows.toLocaleString()} rows • last updated {fmtDate(summary.lastUpdated)}
           </p>
         </div>
-        <a
-          href={csvHref}
-          className="inline-flex items-center rounded-md px-3 py-2 border border-neutral-300 hover:bg-neutral-50 text-sm font-medium"
-        >
-          Download CSV
-        </a>
+        <div className="flex items-center gap-2">
+          <button onClick={fetchSummary} className="inline-flex items-center rounded-md px-3 py-2 border border-neutral-300 hover:bg-neutral-50 text-sm" disabled={refreshing} title="Refresh summary">{refreshing ? 'Refreshing…' : 'Refresh'}</button>
+          <a href={csvHref} className="inline-flex items-center rounded-md px-3 py-2 border border-neutral-300 hover:bg-neutral-50 text-sm font-medium">Download CSV</a>
+        </div>
       </div>
 
       <form onSubmit={onSearch} className="mt-6 flex gap-2">
-        <input
-          type="text"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="Search concept_a / concept_b / code…"
-          className="w-full border rounded-md px-3 py-2"
-        />
-        <button
-          type="submit"
-          className="px-4 py-2 rounded-md bg-black text-white disabled:opacity-50"
-          disabled={loading || !q.trim()}
-        >
-          {loading ? 'Searching…' : 'Search'}
-        </button>
+        <input type="text" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search concept_a / concept_b / code…" className="w-full border rounded-md px-3 py-2" />
+        <button type="submit" className="px-4 py-2 rounded-md bg-black text-white disabled:opacity-50" disabled={loading || !q.trim()}>{loading ? 'Searching…' : 'Search'}</button>
       </form>
 
       {err && <div className="mt-3 text-sm text-red-600">{err}</div>}
@@ -147,11 +125,120 @@ function AdminMasterRecordSection() {
   );
 }
 
+function AdminLLMCacheSection() {
+  const [rows, setRows] = useState<any[]>([]);
+  const [cols, setCols] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState('');
+  const [jobId, setJobId] = useState('');
+  const [stats, setStats] = useState<{ calls: number; sumPrompt: number; sumCompletion: number; sumTotal: number; avgPerCall: number } | null>(null);
+
+  const fetchTail = async () => {
+    setErr('');
+    setLoading(true);
+    try {
+      const qs = new URLSearchParams({ op: 'tail', n: '5' });
+      if (jobId.trim()) qs.set('jobId', jobId.trim());
+      const res = await fetch(`/api/admin-llmcache?${qs.toString()}`, { credentials: 'include' });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j?.error || 'Failed to load LLM cache');
+      setRows(j.rows || []);
+      setCols(j.columns || (j.rows?.length ? Object.keys(j.rows[0]) : []));
+    } catch (e: any) {
+      setErr(String(e?.message || e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchStats = async () => {
+    try {
+      const qs = new URLSearchParams({ op: 'stats' });
+      if (jobId.trim()) qs.set('jobId', jobId.trim());
+      const res = await fetch(`/api/admin-llmcache?${qs.toString()}`, { credentials: 'include' });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j?.error || 'Failed to load stats');
+      const { calls = 0, sumPrompt = 0, sumCompletion = 0, sumTotal = 0, avgPerCall = 0 } = j || {};
+      setStats({ calls, sumPrompt, sumCompletion, sumTotal, avgPerCall });
+    } catch (e) {
+      // ignore in UI; will show on demand
+    }
+  };
+
+  useEffect(() => { fetchTail(); fetchStats(); }, []);
+
+  const csvHref = useMemo(() => {
+    const qs = new URLSearchParams({ op: 'download' });
+    if (jobId.trim()) qs.set('jobId', jobId.trim());
+    return `/api/admin-llmcache?${qs.toString()}`;
+  }, [jobId]);
+
+  return (
+    <section className="border rounded-2xl p-6 bg-white shadow-sm">
+      <div className="flex items-center justify-between gap-4 flex-wrap">
+        <div>
+          <h2 className="text-xl font-semibold">LLM Cache (latest 5)</h2>
+          <p className="text-sm text-neutral-600">Inspect recent cached LLM classifications. Filter by Job ID to focus on a single upload.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={() => { fetchTail(); fetchStats(); }} className="inline-flex items-center rounded-md px-3 py-2 border border-neutral-300 hover:bg-neutral-50 text-sm">Refresh</button>
+          <a href={csvHref} className="inline-flex items-center rounded-md px-3 py-2 border border-neutral-300 hover:bg-neutral-50 text-sm font-medium">Download CSV</a>
+        </div>
+      </div>
+
+      <div className="mt-4 flex items-end gap-2">
+        <div className="flex flex-col">
+          <label className="text-xs text-neutral-600">Filter by Job ID</label>
+          <input value={jobId} onChange={(e) => setJobId(e.target.value)} placeholder="e.g. clxyz…" className="border rounded-md px-3 py-2 w-80" />
+        </div>
+        <button onClick={() => { fetchTail(); fetchStats(); }} className="px-3 py-2 rounded-md border">Apply</button>
+        <button onClick={() => { setJobId(''); fetchTail(); fetchStats(); }} className="px-3 py-2 rounded-md border">Clear</button>
+        {stats && (
+          <div className="ml-auto text-sm text-neutral-700">
+            <span className="mr-4">Calls: <strong>{stats.calls}</strong></span>
+            <span className="mr-4">Total tokens: <strong>{stats.sumTotal}</strong></span>
+            <span className="mr-4">Avg tokens/call: <strong>{stats.avgPerCall}</strong></span>
+          </div>
+        )}
+      </div>
+
+      {err && <div className="mt-3 text-sm text-red-600">{err}</div>}
+
+      {loading ? (
+        <div className="mt-4 text-sm">Loading…</div>
+      ) : rows.length === 0 ? (
+        <div className="mt-4 text-sm text-neutral-600">No records found.</div>
+      ) : (
+        <div className="mt-4 overflow-x-auto">
+          <table className="min-w-full text-sm">
+            <thead>
+              <tr className="text-left border-b">
+                {cols.map((c) => (
+                  <th key={c} className="py-2 pr-4">{c}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, idx) => (
+                <tr key={idx} className="border-b align-top">
+                  {cols.map((c) => (
+                    <td key={c} className="py-2 pr-4 whitespace-pre-wrap">{String(r[c] ?? '')}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+interface AdminJobRow { id: string; fileName: string; userEmail?: string; rowCount?: number; createdAt: string; status: string; outputUrl?: string; }
+
 const AdminPage: React.FC = () => {
-  // Optional user banner; works whether useAuth returns {user,...} or user directly
   const auth = (useAuth() as any) || {};
   const user = auth.user ?? auth ?? null;
-
   const [jobs, setJobs] = useState<AdminJobRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -159,6 +246,8 @@ const AdminPage: React.FC = () => {
   const [who, setWho] = useState<string>('');
 
   const [deleteFilters, setDeleteFilters] = useState({ date: '', status: '', user: '' });
+  const [confirming, setConfirming] = useState(false);
+  const [previewCount, setPreviewCount] = useState<number | null>(null);
 
   const fetchJobs = async () => {
     setLoading(true);
@@ -187,7 +276,26 @@ const AdminPage: React.FC = () => {
 
   useEffect(() => { fetchJobs(); }, []);
 
-  const handleDelete = async () => {
+  const previewDelete = async () => {
+    setError(null);
+    try {
+      const qs = new URLSearchParams();
+      if (deleteFilters.date) qs.set('date', deleteFilters.date);
+      if (deleteFilters.status) qs.set('status', deleteFilters.status);
+      if (deleteFilters.user) qs.set('user', deleteFilters.user);
+      qs.set('op', 'count');
+      const res = await fetch(`/api/admin-jobs?${qs.toString()}`, { credentials: 'include' });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j?.error || 'Failed to preview delete');
+      setPreviewCount(Number(j.count || 0));
+      setConfirming(true);
+    } catch (e: any) {
+      setError(e?.message || 'Failed to preview delete');
+    }
+  };
+
+  const doDelete = async () => {
+    setConfirming(false);
     try {
       const res = await fetch('/api/admin-jobs', {
         method: 'DELETE',
@@ -195,12 +303,11 @@ const AdminPage: React.FC = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(deleteFilters),
       });
-      if (!res.ok) {
-        const txt = await res.text();
-        throw new Error(`delete failed ${res.status}: ${txt}`);
-      }
-      await fetchJobs();
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || `Delete failed (${res.status})`);
+      setPreviewCount(null);
       setDeleteFilters({ date: '', status: '', user: '' });
+      await fetchJobs();
     } catch (e: any) {
       setError(e?.message || 'Failed to delete jobs');
     }
@@ -210,7 +317,6 @@ const AdminPage: React.FC = () => {
     <div>
       <Header title="Administrator Dashboard" />
       <main className="p-4 space-y-6">
-        {/* Signed-in user banner */}
         {user && (
           <div className="text-sm mb-2">
             Signed in as <strong>{user?.name || user?.email || 'User'}</strong>
@@ -223,17 +329,12 @@ const AdminPage: React.FC = () => {
         {forbidden ? (
           <div className="p-3 rounded-md border border-red-300 bg-red-50 text-red-800">
             You do not have admin access.
-            {who ? (
-              <>
-                {' '}Detected as <strong>{who}</strong>. If this is your account, ensure it appears in <code>ADMIN_EMAILS</code> and that your
-                session passes the email to the function.
-              </>
-            ) : null}
+            {who ? (<><span> </span>Detected as <strong>{who}</strong>. Ensure your email is in <code>ADMIN_EMAILS</code> and your session includes it.</> ) : null}
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-6">
-            {/* NEW: MasterRecord section */}
             <AdminMasterRecordSection />
+            <AdminLLMCacheSection />
 
             {/* Jobs list */}
             <section>
@@ -263,17 +364,9 @@ const AdminPage: React.FC = () => {
                           <td className="p-2 border-b align-top">{j.fileName}</td>
                           <td className="p-2 border-b align-top">{j.userEmail || '—'}</td>
                           <td className="p-2 border-b align-top">{j.rowCount ?? '—'}</td>
-                          <td className="p-2 border-b align-top">
-                            {new Date(j.createdAt).toLocaleString('en-US', { timeZone: 'America/Indiana/Indianapolis' })}
-                          </td>
+                          <td className="p-2 border-b align-top">{fmtDate(j.createdAt)}</td>
                           <td className="p-2 border-b align-top">{j.status}</td>
-                          <td className="p-2 border-b align-top">
-                            {j.outputUrl ? (
-                              <a href={j.outputUrl} className="text-blue-600 underline">Download</a>
-                            ) : (
-                              '—'
-                            )}
-                          </td>
+                          <td className="p-2 border-b align-top">{j.outputUrl ? (<a href={j.outputUrl} className="text-blue-600 underline">Download</a>) : '—'}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -282,36 +375,33 @@ const AdminPage: React.FC = () => {
               )}
             </section>
 
-            {/* Delete jobs */}
+            {/* Delete jobs with confirmation */}
             <section>
               <h2 className="text-xl font-semibold mb-2">Delete Jobs</h2>
-              <p className="text-sm mb-2">Use any combination of filters below; leave blank to ignore a filter.</p>
+              <p className="text-sm mb-2">Choose filters. A preview count will be shown before deletion.</p>
               <div className="flex flex-col gap-2 max-w-md">
-                <input
-                  type="date"
-                  value={deleteFilters.date}
-                  onChange={(e) => setDeleteFilters({ ...deleteFilters, date: e.target.value })}
-                  className="border rounded p-1"
-                />
-                <select
-                  value={deleteFilters.status}
-                  onChange={(e) => setDeleteFilters({ ...deleteFilters, status: e.target.value })}
-                  className="border rounded p-1"
-                >
+                <input type="date" value={deleteFilters.date} onChange={(e) => setDeleteFilters({ ...deleteFilters, date: e.target.value })} className="border rounded p-1" />
+                <select value={deleteFilters.status} onChange={(e) => setDeleteFilters({ ...deleteFilters, status: e.target.value })} className="border rounded p-1">
                   <option value="">--Status--</option>
                   <option value="queued">Queued</option>
                   <option value="running">Running</option>
                   <option value="completed">Completed</option>
                   <option value="failed">Failed</option>
                 </select>
-                <input
-                  type="text"
-                  placeholder="User email"
-                  value={deleteFilters.user}
-                  onChange={(e) => setDeleteFilters({ ...deleteFilters, user: e.target.value })}
-                  className="border rounded p-1"
-                />
-                <button onClick={handleDelete} className="px-3 py-2 rounded bg-red-700 text-white w-fit">Delete Selected Jobs</button>
+                <input type="text" placeholder="User email" value={deleteFilters.user} onChange={(e) => setDeleteFilters({ ...deleteFilters, user: e.target.value })} className="border rounded p-1" />
+                <div className="flex items-center gap-2">
+                  <button onClick={async () => { await previewDelete(); }} className="px-3 py-2 rounded bg-neutral-800 text-white w-fit">Preview</button>
+                  {previewCount != null && <span className="text-sm text-neutral-600">Matches: {previewCount}</span>}
+                </div>
+                {confirming && (
+                  <div className="p-3 border rounded bg-yellow-50 text-yellow-900">
+                    Delete <strong>{previewCount}</strong> job(s)? This cannot be undone.
+                    <div className="mt-2 flex gap-2">
+                      <button onClick={async () => { await doDelete(); }} className="px-3 py-2 rounded bg-red-700 text-white">Confirm delete</button>
+                      <button onClick={() => { setConfirming(false); setPreviewCount(null); }} className="px-3 py-2 rounded border">Cancel</button>
+                    </div>
+                  </div>
+                )}
               </div>
             </section>
           </div>

@@ -1,17 +1,11 @@
-// netlify/functions/process-upload-background.mjs
+// netlify/functions/process-upload-background.mjs (LLM cache linked)
 // Background worker: resumable, time‑boxed, single CSV merged as it goes
-// - Reads the uploaded file from Netlify Blobs via the Upload record
-// - Processes sequentially from job.rowsProcessed (acts as nextOffset)
-// - Appends enriched rows to ONE CSV blob (header written once)
-// - Time‑boxes each run (~12 min) and re‑invokes itself if not done
+// Adds per‑LLM‑call logging to a Blobs CSV cache (job‑linked) for later analytics.
 
 import { getStore } from '@netlify/blobs';
 import { parse as parseCsv } from 'csv-parse/sync';
 import * as XLSX from 'xlsx';
 import { PrismaClient } from '@prisma/client';
-
-// Reuse project auth/util side effects if needed (harmless if not used)
-import authUtilsCjs from './utils/auth.js'; // eslint-disable-line no-unused-vars
 
 const prisma = globalThis.__prisma || new PrismaClient();
 // @ts-ignore
@@ -23,6 +17,8 @@ const FLUSH_EVERY_ROWS = Number(process.env.FLUSH_EVERY_ROWS || 50);
 const FLUSH_EVERY_MS = Number(process.env.FLUSH_EVERY_MS || 5000);
 const PRIMARY_MODEL = process.env.OPENAI_API_MODEL || 'gpt-4o-mini';
 const MODEL_FALLBACKS = [PRIMARY_MODEL, 'gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini'].filter(Boolean);
+const LLM_CACHE_STORE = process.env.LLM_CACHE_STORE || 'cache';
+const LLM_CACHE_BLOB_KEY = process.env.LLM_CACHE_BLOB_KEY || 'llmcache.csv';
 
 // ===== Relationship categories (labels only used for sanity fallback) =====
 const RELATIONSHIP_TYPES = {
@@ -97,42 +93,42 @@ function pickEventsAe(row) {
 async function classifyRelationship({ conceptAText, conceptBText, events_ab, events_ab_ae }) {
   const prompt = (
     `You are an expert diagnostician skilled at identifying clinical relationships between ICD-10-CM diagnosis concepts.\n` +
-    `Statistical indicators provided:\n` +
-    `- events_ab (co-occurrences): ${events_ab}\n` +
-    `- events_ab_ae (actual-to-expected ratio): ${Number(events_ab_ae ?? 0).toFixed(2)}\n\n` +
-    `Interpretation guidelines:\n` +
-    `- ≥ 2.0: Strong statistical evidence; carefully consider relationships.\n` +
-    `- 1.5–1.99: Moderate evidence; cautious evaluation.\n` +
-    `- 1.0–1.49: Weak evidence; rely primarily on clinical knowledge.\n` +
-    `- < 1.0: Minimal evidence; avoid indirect/speculative claims.\n\n` +
-    `Explicit guidelines to avoid speculation:\n` +
-    `- Direct causation: Only if explicit and clinically accepted.\n` +
-    `  Example: Pneumonia causes cough.\n\n` +
-    `- Indirect causation: Only with explicit and named intermediate diagnosis.\n` +
-    `  Example: Pneumonia → sepsis → acute kidney injury.\n\n` +
-    `- Common cause: Only with clearly documented third diagnosis.\n` +
-    `  Example: Obesity clearly causing both diabetes type 2 and osteoarthritis.\n\n` +
-    `- Treatment-caused: Only if explicitly well-documented.\n` +
-    `  Example: Chemotherapy for cancer causing nausea.\n\n` +
-    `- Similar presentations: Only if clinically documented similarity exists.\n\n` +
-    `- Subset relationship: Explicitly broader or unspecified form.\n\n` +
-    `If evidence or explicit documentation is lacking, choose category 11 (No clear relationship).\n\n` +
-    `Classify explicitly the relationship between:\n` +
-    `- Concept A: ${conceptAText}\n` +
-    `- Concept B: ${conceptBText}\n\n` +
-    `Categories:\n` +
-    `1: A causes B\n` +
-    `2: B causes A\n` +
-    `3: A indirectly causes B (explicit intermediate required)\n` +
-    `4: B indirectly causes A (explicit intermediate required)\n` +
-    `5: A and B share common cause (explicit third condition required)\n` +
-    `6: Treatment of A causes B (explicit treatment documentation required)\n` +
-    `7: Treatment of B causes A (explicit treatment documentation required)\n` +
-    `8: A and B have similar initial presentations\n` +
-    `9: A is subset of B\n` +
-    `10: B is subset of A\n` +
-    `11: No clear relationship (default)\n\n` +
-    `Answer exactly as "<number>: <short description>: <concise rationale>".`
+      `Statistical indicators provided:\n` +
+      `- events_ab (co-occurrences): ${events_ab}\n` +
+      `- events_ab_ae (actual-to-expected ratio): ${Number(events_ab_ae ?? 0).toFixed(2)}\n\n` +
+      `Interpretation guidelines:\n` +
+      `- ≥ 2.0: Strong statistical evidence; carefully consider relationships.\n` +
+      `- 1.5–1.99: Moderate evidence; cautious evaluation.\n` +
+      `- 1.0–1.49: Weak evidence; rely primarily on clinical knowledge.\n` +
+      `- < 1.0: Minimal evidence; avoid indirect/speculative claims.\n\n` +
+      `Explicit guidelines to avoid speculation:\n` +
+      `- Direct causation: Only if explicit and clinically accepted.\n` +
+      `  Example: Pneumonia causes cough.\n\n` +
+      `- Indirect causation: Only with explicit and named intermediate diagnosis.\n` +
+      `  Example: Pneumonia → sepsis → acute kidney injury.\n\n` +
+      `- Common cause: Only with clearly documented third diagnosis.\n` +
+      `  Example: Obesity clearly causing both diabetes type 2 and osteoarthritis.\n\n` +
+      `- Treatment-caused: Only if explicitly well-documented.\n` +
+      `  Example: Chemotherapy for cancer causing nausea.\n\n` +
+      `- Similar presentations: Only if clinically documented similarity exists.\n\n` +
+      `- Subset relationship: Explicitly broader or unspecified form.\n\n` +
+      `If evidence or explicit documentation is lacking, choose category 11 (No clear relationship).\n\n` +
+      `Classify explicitly the relationship between:\n` +
+      `- Concept A: ${conceptAText}\n` +
+      `- Concept B: ${conceptBText}\n\n` +
+      `Categories:\n` +
+      `1: A causes B\n` +
+      `2: B causes A\n` +
+      `3: A indirectly causes B (explicit intermediate required)\n` +
+      `4: B indirectly causes A (explicit intermediate required)\n` +
+      `5: A and B share common cause (explicit third condition required)\n` +
+      `6: Treatment of A causes B (explicit treatment documentation required)\n` +
+      `7: Treatment of B causes A (explicit treatment documentation required)\n` +
+      `8: A and B have similar initial presentations\n` +
+      `9: A is subset of B\n` +
+      `10: B is subset of A\n` +
+      `11: No clear relationship (default)\n\n` +
+      `Answer exactly as "<number>: <short description>: <concise rationale>".`
   );
 
   console.log('[LLM] model candidates:', MODEL_FALLBACKS.join(', '));
@@ -161,24 +157,23 @@ async function classifyRelationship({ conceptAText, conceptBText, events_ab, eve
       const relType = (parts[1] || '').trim() || RELATIONSHIP_TYPES[relCode] || RELATIONSHIP_TYPES[11];
       const rationalText = (parts.slice(2).join(': ') || '').trim() || '—';
       const safeCode = Number.isFinite(relCode) ? relCode : 11;
-      return { relCode: safeCode, relType, rationalText, usedModel: model };
+      const usage = data?.usage || {};
+      return { relCode: safeCode, relType, rationalText, usedModel: model, usage };
     } catch (e) {
       console.error('[LLM] exception for model', model, e?.message || e);
     }
   }
-  return { relCode: 11, relType: RELATIONSHIP_TYPES[11], rationalText: lastErrText ? `LLM error: ${lastErrText.slice(0, 200)}` : 'LLM unavailable', usedModel: MODEL_FALLBACKS[0] };
+  return { relCode: 11, relType: RELATIONSHIP_TYPES[11], rationalText: lastErrText ? `LLM error: ${lastErrText.slice(0, 200)}` : 'LLM unavailable', usedModel: MODEL_FALLBACKS[0], usage: {} };
 }
 
-function ensureHeader(existingCsvText, enrichedSample) {
+function ensureHeader(existingCsvText, headersFromSample) {
   if (existingCsvText && existingCsvText.length > 0) {
     const firstNl = existingCsvText.indexOf('\n');
     const headerLine = firstNl >= 0 ? existingCsvText.slice(0, firstNl) : existingCsvText;
-    const headers = headerLine.split(','); // header has no quotes/commas
+    const headers = headerLine.split(','); // assumes header has no commas that need quoting
     return { headers, csvText: existingCsvText, headerExists: true };
   }
-  // Build a header from the sample row keys
-  const baseKeys = Object.keys(enrichedSample || {});
-  const uniq = Array.from(new Set(baseKeys));
+  const uniq = Array.from(new Set(headersFromSample || []));
   const headerLine = uniq.join(',') + '\n';
   return { headers: uniq, csvText: headerLine, headerExists: false };
 }
@@ -193,7 +188,6 @@ function rowToCsvLine(row, headers) {
 
 export default async (req) => {
   try {
-    // Only POST with { jobId }
     if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405, headers: { 'content-type': 'text/plain; charset=utf-8' } });
     const { jobId } = await req.json();
     if (!jobId) return new Response(JSON.stringify({ error: 'Missing jobId' }), { status: 400, headers: { 'content-type': 'application/json' } });
@@ -202,22 +196,20 @@ export default async (req) => {
     if (!job) return new Response(JSON.stringify({ error: 'Job not found' }), { status: 404, headers: { 'content-type': 'application/json' } });
     if (job.status === 'completed' || job.status === 'failed') return new Response(JSON.stringify({ ok: true, status: job.status }), { status: 202, headers: { 'content-type': 'application/json' } });
 
-    // Mark running
-    await prisma.job.update({ where: { id: jobId }, data: { status: 'running' } });
+    await prisma.job.update({ where: { id: jobId }, data: { status: 'running', lastHeartbeat: new Date() } });
 
-    // Load upload record and blob
     const upload = await prisma.upload.findUnique({ where: { id: job.uploadId } });
     if (!upload) throw new Error('Upload record not found');
 
     const uploadsStore = getStore('uploads');
     const outputsStore = getStore('outputs');
+    const cacheStore = getStore(LLM_CACHE_STORE);
 
     const buffer = await uploadsStore.get(upload.blobKey, { type: 'arrayBuffer' });
     if (!buffer) throw new Error('Uploaded blob not found');
 
     const rows = parseUploadBufferToRows(buffer, upload.originalName || upload.blobKey);
 
-    // Initialize totals if needed
     const rowsTotal = job.rowsTotal && job.rowsTotal > 0 ? job.rowsTotal : rows.length;
     if (rowsTotal !== job.rowsTotal) {
       await prisma.job.update({ where: { id: jobId }, data: { rowsTotal } });
@@ -225,26 +217,33 @@ export default async (req) => {
 
     let offset = job.rowsProcessed || 0; // resume from here
     if (offset >= rowsTotal) {
-      // already done; finalize
       await prisma.job.update({ where: { id: jobId }, data: { status: 'completed', finishedAt: new Date() } });
       return new Response(JSON.stringify({ ok: true, status: 'completed' }), { status: 202, headers: { 'content-type': 'application/json' } });
     }
 
-    // Determine output blob key
     const outputBlobKey = job.outputBlobKey || `outputs/${jobId}.csv`;
     if (!job.outputBlobKey) {
       await prisma.job.update({ where: { id: jobId }, data: { outputBlobKey } });
     }
 
-    // Load existing CSV once per run; we will append and write back on each flush
-    let csvText = (await outputsStore.get(outputBlobKey, { type: 'text' })) || '';
+    // Load existing main CSV once per run
+    let mainCsvText = (await outputsStore.get(outputBlobKey, { type: 'text' })) || '';
+    // Prepare LLM cache batch; we will flush alongside main CSV flushes
+    let llmCacheText = null; // lazy-load once when first LLM entry is produced
+    let llmCacheHeaders = [
+      'timestamp', 'jobId', 'uploadId', 'userId', 'rowIndex', 'pairId',
+      'system_a', 'code_a', 'system_b', 'code_b', 'concept_a_t', 'concept_b_t',
+      'model', 'relationship_code', 'relationship_type',
+      'prompt_tokens', 'completion_tokens', 'total_tokens'
+    ];
+    const llmCacheBatch = [];
 
     const start = Date.now();
     let lastFlush = Date.now();
     let processedThisRun = 0;
 
-    // Prime header from existing CSV if present; otherwise from first enriched sample we'll see below
-    let headerInfo = null; // { headers, csvText, headerExists }
+    // Prime main header from existing CSV, otherwise from first enriched row we see
+    let mainHeader = null; // string[]
 
     for (; offset < rowsTotal; offset++) {
       const row = rows[offset];
@@ -264,14 +263,14 @@ export default async (req) => {
         existing = await prisma.masterRecord.findFirst({ where: { pairId } });
       }
 
-      let relCode, relType, rationalText, usedModel;
+      let relCode, relType, rationalText, usedModel, usage;
 
       if (!existing) {
         const { a: conceptAText, b: conceptBText } = pickConceptText(row);
         const events_ab = pickEventsAb(row);
         const events_ab_ae = pickEventsAe(row);
         const cls = await classifyRelationship({ conceptAText, conceptBText, events_ab, events_ab_ae });
-        ({ relCode, relType, rationalText, usedModel } = cls);
+        ({ relCode, relType, rationalText, usedModel, usage } = cls);
 
         await prisma.masterRecord.create({
           data: {
@@ -294,6 +293,29 @@ export default async (req) => {
             source_count: 1,
           },
         });
+
+        // Queue LLM cache line (per LLM call)
+        const cacheRow = {
+          timestamp: new Date().toISOString(),
+          jobId,
+          uploadId: job.uploadId,
+          userId: job.userId,
+          rowIndex: String(offset),
+          pairId,
+          system_a,
+          code_a,
+          system_b,
+          code_b,
+          concept_a_t: String(row.concept_a_t ?? row.concept_a ?? ''),
+          concept_b_t: String(row.concept_b_t ?? row.concept_b ?? ''),
+          model: usedModel || PRIMARY_MODEL,
+          relationship_code: String(relCode),
+          relationship_type: relType,
+          prompt_tokens: String(usage?.prompt_tokens ?? ''),
+          completion_tokens: String(usage?.completion_tokens ?? ''),
+          total_tokens: String(usage?.total_tokens ?? ''),
+        };
+        llmCacheBatch.push(cacheRow);
       } else {
         relCode = Number(existing.relationshipCode ?? 11) || 11;
         relType = String(existing.relationshipType ?? RELATIONSHIP_TYPES[11]);
@@ -310,7 +332,7 @@ export default async (req) => {
         });
       }
 
-      // Enriched output row to append
+      // Enriched output row (file output)
       const enriched = {
         ...row,
         type_a: typeof type_a === 'string' ? type_a : '',
@@ -320,40 +342,59 @@ export default async (req) => {
         rational: rationalText,
       };
 
-      if (!headerInfo) {
-        headerInfo = ensureHeader(csvText, enriched);
-        csvText = headerInfo.csvText; // may include header if not present
+      if (!mainHeader) {
+        // if main CSV already has a header, read it; else derive from enriched keys
+        const prime = ensureHeader(mainCsvText, Object.keys(enriched));
+        mainHeader = prime.headers;
+        mainCsvText = prime.csvText;
       }
-      const line = rowToCsvLine(enriched, headerInfo.headers);
-      csvText += line + '\n';
+      const line = rowToCsvLine(enriched, mainHeader);
+      mainCsvText += line + '\n';
 
       processedThisRun += 1;
 
       const now = Date.now();
-      const timeUp = now - start > MAX_RUN_MS - 15_000; // keep a buffer
+      const timeUp = now - start > MAX_RUN_MS - 15_000; // keep buffer
       const needFlush = processedThisRun % FLUSH_EVERY_ROWS === 0 || now - lastFlush > FLUSH_EVERY_MS || timeUp;
 
       if (needFlush) {
-        // Persist CSV and checkpoint progress
-        await outputsStore.set(outputBlobKey, csvText, { contentType: 'text/csv' });
-        await prisma.job.update({
-          where: { id: jobId },
-          data: {
-            rowsProcessed: offset + 1,
-            outputBlobKey,
-          },
-        });
+        // Flush main CSV
+        await outputsStore.set(outputBlobKey, mainCsvText, { contentType: 'text/csv' });
+        // Flush LLM cache if we have items
+        if (llmCacheBatch.length > 0) {
+          if (llmCacheText == null) {
+            llmCacheText = (await cacheStore.get(LLM_CACHE_BLOB_KEY, { type: 'text' })) || '';
+          }
+          const prime = ensureHeader(llmCacheText, llmCacheHeaders);
+          const headers = prime.headers;
+          llmCacheText = prime.csvText;
+          for (const cacheRow of llmCacheBatch) {
+            llmCacheText += rowToCsvLine(cacheRow, headers) + '\n';
+          }
+          await cacheStore.set(LLM_CACHE_BLOB_KEY, llmCacheText, { contentType: 'text/csv' });
+          llmCacheBatch.length = 0;
+        }
+        // Heartbeat + checkpoint
+        await prisma.job.update({ where: { id: jobId }, data: { rowsProcessed: offset + 1, outputBlobKey, lastHeartbeat: new Date() } });
         lastFlush = now;
       }
 
-      if (timeUp) break; // stop this run; watchdog/self-chain will resume
+      if (timeUp) break;
     }
 
-    // Final flush for this run (if the last loop didn't)
-    await outputsStore.set(outputBlobKey, csvText, { contentType: 'text/csv' });
-    await prisma.job.update({ where: { id: jobId }, data: { rowsProcessed: offset, outputBlobKey } });
+    // Final flush of this run
+    await getStore('outputs').set(job.outputBlobKey || `outputs/${jobId}.csv`, mainCsvText, { contentType: 'text/csv' });
+    if (llmCacheBatch.length > 0) {
+      const cacheStore2 = getStore(LLM_CACHE_STORE);
+      let cacheText2 = (await cacheStore2.get(LLM_CACHE_BLOB_KEY, { type: 'text' })) || '';
+      const prime = ensureHeader(cacheText2, llmCacheHeaders);
+      const headers = prime.headers;
+      cacheText2 = prime.csvText;
+      for (const cacheRow of llmCacheBatch) cacheText2 += rowToCsvLine(cacheRow, headers) + '\n';
+      await cacheStore2.set(LLM_CACHE_BLOB_KEY, cacheText2, { contentType: 'text/csv' });
+    }
+    await prisma.job.update({ where: { id: jobId }, data: { rowsProcessed: offset, outputBlobKey: outputBlobKey, lastHeartbeat: new Date() } });
 
-    // Completed?
     if (offset >= rowsTotal) {
       await prisma.job.update({ where: { id: jobId }, data: { status: 'completed', finishedAt: new Date() } });
       return new Response(JSON.stringify({ ok: true, status: 'completed' }), { status: 202, headers: { 'content-type': 'application/json' } });

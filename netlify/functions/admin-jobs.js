@@ -1,195 +1,118 @@
-// Netlify Function: admin-jobs
-// Purpose: list/delete jobs for admins. Admin = user.isAdmin OR email in ADMIN_EMAILS
-// This version performs robust email extraction from:
-//  1) your existing getUserFromRequest(event)
-//  2) x-user-email header
-//  3) Authorization: Bearer <JWT> (Netlify Identity/JWT)
-//  4) nf_jwt cookie (Netlify Identity)
+// netlify/functions/admin-jobs.js
+// Admin jobs API with safe delete + count preview
+// Supports:
+//   GET    /api/admin-jobs                       -> list jobs (existing behavior)
+//   GET    /api/admin-jobs?op=count&...          -> count jobs matching delete filters (preview)
+//   DELETE /api/admin-jobs { date, status, user }-> delete matching jobs (with same filters)
 
-const prisma = require('./utils/prisma');
-const { getUserFromRequest } = require('./utils/auth');
+import { PrismaClient } from '@prisma/client'
+import authUtilsCjs from './utils/auth.js'
 
-function json(statusCode, body) {
-  return {
-    statusCode,
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  };
+const prisma = globalThis.__prisma || new PrismaClient()
+// @ts-ignore
+globalThis.__prisma = prisma
+const { getUserFromRequest } = authUtilsCjs
+
+function json(body, status = 200) {
+  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 }
 
-function allowOriginHeaders() {
-  return {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET,DELETE,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-User-Email',
-  };
+function isAdmin(user) {
+  if (!user) return false
+  if (user.isAdmin === true) return true
+  const allow = (process.env.ADMIN_EMAILS || '').split(/[\s,]+/).filter(Boolean).map((s) => s.toLowerCase())
+  return allow.includes(String(user.email || '').toLowerCase())
 }
 
-function base64UrlToBase64(s) {
-  if (!s) return '';
-  s = s.replace(/-/g, '+').replace(/_/g, '/');
-  const pad = s.length % 4;
-  if (pad) s += '='.repeat(4 - pad);
-  return s;
+function endOfDayISO(dateStr) {
+  if (!dateStr) return null
+  const d = new Date(dateStr)
+  if (Number.isNaN(+d)) return null
+  d.setUTCHours(23, 59, 59, 999)
+  return d
 }
 
-function decodeJwtPayload(token) {
+async function buildWhere({ date, status, user }) {
+  const where = {}
+  if (date) {
+    const by = endOfDayISO(date)
+    if (by) where.createdAt = { lte: by }
+  }
+  if (status) where.status = String(status)
+  if (user) {
+    // try to resolve user by email -> userId
+    const u = await prisma.user.findUnique({ where: { email: String(user) } }).catch(() => null)
+    if (u) where.userId = u.id
+    else where.userId = '__no_match__' // ensures zero results if email not found
+  }
+  return where
+}
+
+export default async (req) => {
   try {
-    const parts = String(token).split('.');
-    if (parts.length < 2) return null;
-    const b64 = base64UrlToBase64(parts[1]);
-    const json = Buffer.from(b64, 'base64').toString('utf8');
-    return JSON.parse(json);
-  } catch (_) {
-    return null;
-  }
-}
+    const eventLike = { headers: { cookie: req.headers.get('cookie') || '' } }
+    const user = await getUserFromRequest(eventLike)
+    if (!isAdmin(user)) return json({ error: 'Forbidden' }, 403)
 
-function getCookie(name, cookieHeader) {
-  if (!cookieHeader) return null;
-  const cookies = cookieHeader.split(';').map((c) => c.trim());
-  for (const c of cookies) {
-    const idx = c.indexOf('=');
-    if (idx === -1) continue;
-    const k = c.slice(0, idx);
-    const v = c.slice(idx + 1);
-    if (k === name) return decodeURIComponent(v);
-  }
-  return null;
-}
+    const url = new URL(req.url)
+    const method = req.method.toUpperCase()
 
-function extractEmailFromJwt(token) {
-  const payload = decodeJwtPayload(token);
-  if (!payload) return null;
-  return (
-    payload.email ||
-    (Array.isArray(payload.emails) && payload.emails[0]) ||
-    payload['http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress'] ||
-    null
-  );
-}
-
-function resolveEmailFrom(event, user) {
-  const hdrs = event.headers || {};
-  const headerEmail = hdrs['x-user-email'] || hdrs['X-User-Email'] || hdrs['x-user'] || hdrs['X-User'];
-  if (user && user.email) return user.email;
-  if (headerEmail) return headerEmail;
-
-  // Authorization: Bearer <jwt>
-  const auth = hdrs.authorization || hdrs.Authorization;
-  if (auth && /^Bearer\s+/i.test(auth)) {
-    const token = auth.replace(/^Bearer\s+/i, '').trim();
-    const email = extractEmailFromJwt(token);
-    if (email) return email;
-  }
-
-  // nf_jwt cookie (Netlify Identity)
-  const cookieJwt = getCookie('nf_jwt', hdrs.cookie || hdrs.Cookie);
-  if (cookieJwt) {
-    const email = extractEmailFromJwt(cookieJwt);
-    if (email) return email;
-  }
-
-  return '';
-}
-
-function isAdminUser(email, user) {
-  const list = (process.env.ADMIN_EMAILS || '')
-    .split(',')
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
-  const emailOk = email && list.includes(String(email).toLowerCase());
-  return Boolean((user && user.isAdmin) || emailOk);
-}
-
-exports.handler = async function (event) {
-  try {
-    if (event.httpMethod === 'OPTIONS') {
-      return { statusCode: 204, headers: allowOriginHeaders(), body: '' };
-    }
-
-    console.log('[admin-jobs] invoked', {
-      method: event.httpMethod,
-      path: event.path,
-      qs: event.queryStringParameters,
-    });
-
-    // Resolve user via your auth util
-    let user = null;
-    try {
-      user = await getUserFromRequest(event);
-    } catch (e) {
-      console.warn('[admin-jobs] getUserFromRequest failed:', e?.message || e);
-    }
-
-    const email = resolveEmailFrom(event, user);
-    const allowed = isAdminUser(email, user);
-
-    console.log('[admin-jobs] auth check', {
-      email: email || '(none)',
-      envAdmins: (process.env.ADMIN_EMAILS || '').split(',').map((s) => s.trim()).filter(Boolean),
-      userIsAdminFlag: Boolean(user && user.isAdmin),
-      allowed,
-    });
-
-    if (!allowed) {
-      return json(403, { error: 'Forbidden', who: email || '(unknown)' });
-    }
-
-    if (event.httpMethod === 'GET') {
-      try {
-        const jobs = await prisma.job.findMany({
-          include: { upload: { include: { user: true } } },
-          orderBy: { createdAt: 'desc' },
-        });
-        const results = jobs.map((job) => ({
-          id: job.id,
-          fileName: job.upload?.originalName ?? '(unknown)',
-          userEmail: job.upload?.user?.email ?? '',
-          rowCount: job.rowsTotal ?? 0,
-          createdAt: job.createdAt instanceof Date ? job.createdAt.toISOString() : String(job.createdAt),
-          status: job.status,
-          outputUrl: job.outputBlobKey ? `/api/download?job=${encodeURIComponent(job.id)}` : undefined,
-        }));
-        return json(200, results);
-      } catch (err) {
-        console.error('[admin-jobs] GET failed', err);
-        return json(500, { error: err?.message || 'Failed to load jobs' });
+    if (method === 'GET') {
+      const op = url.searchParams.get('op') || ''
+      if (op === 'count') {
+        const date = url.searchParams.get('date') || ''
+        const status = url.searchParams.get('status') || ''
+        const who = url.searchParams.get('user') || ''
+        const where = await buildWhere({ date, status, user: who })
+        const count = await prisma.job.count({ where })
+        return json({ date, status, user: who, count })
       }
+
+      // Default list
+      const rows = await prisma.job.findMany({
+        orderBy: { createdAt: 'desc' },
+        take: 200,
+        select: {
+          id: true,
+          uploadId: true,
+          status: true,
+          rowsTotal: true,
+          rowsProcessed: true,
+          userId: true,
+          outputBlobKey: true,
+          createdAt: true,
+          finishedAt: true,
+        },
+      })
+      // hydrate user email + filename if helpful
+      const users = await prisma.user.findMany({ where: { id: { in: Array.from(new Set(rows.map((r) => r.userId))) } }, select: { id: true, email: true } })
+      const userMap = new Map(users.map((u) => [u.id, u.email]))
+      const uploads = await prisma.upload.findMany({ where: { id: { in: Array.from(new Set(rows.map((r) => r.uploadId))) } }, select: { id: true, originalName: true } })
+      const uploadMap = new Map(uploads.map((u) => [u.id, u.originalName]))
+      const shaped = rows.map((r) => ({
+        id: r.id,
+        status: r.status,
+        rowCount: r.rowsTotal,
+        userEmail: userMap.get(r.userId) || null,
+        fileName: uploadMap.get(r.uploadId) || r.uploadId,
+        createdAt: r.createdAt,
+        outputUrl: r.outputBlobKey ? `/api/download?job=${encodeURIComponent(r.id)}` : null,
+      }))
+      return json(shaped)
     }
 
-    if (event.httpMethod === 'DELETE') {
-      try {
-        const body = event.body ? JSON.parse(event.body) : {};
-        /** @type {import('@prisma/client').Prisma.JobWhereInput} */
-        const where = {};
-
-        if (body.date) {
-          const d = new Date(body.date);
-          if (!isNaN(d)) where.createdAt = { lte: d };
-        }
-        if (body.status) where.status = body.status;
-        if (body.user) where.upload = { is: { user: { is: { email: body.user } } } };
-
-        const jobsToDelete = await prisma.job.findMany({ where, include: { upload: true } });
-        const jobIds = jobsToDelete.map((j) => j.id);
-        const uploadIds = jobsToDelete.map((j) => j.uploadId).filter(Boolean);
-
-        await prisma.$transaction([
-          prisma.job.deleteMany({ where: { id: { in: jobIds } } }),
-          prisma.upload.deleteMany({ where: { id: { in: uploadIds } } }),
-        ]);
-
-        return json(200, { deleted: jobIds.length });
-      } catch (err) {
-        console.error('[admin-jobs] DELETE failed', err);
-        return json(400, { error: err?.message || 'Delete failed' });
-      }
+    if (method === 'DELETE') {
+      const body = await req.json().catch(() => ({}))
+      const { date = '', status = '', user: who = '' } = body || {}
+      const where = await buildWhere({ date, status, user: who })
+      const count = await prisma.job.count({ where })
+      const res = await prisma.job.deleteMany({ where })
+      return json({ requested: count, deleted: res.count })
     }
 
-    return { statusCode: 405, headers: { 'Content-Type': 'text/plain' }, body: 'Method Not Allowed' };
-  } catch (e) {
-    console.error('[admin-jobs] unhandled', e);
-    return json(500, { error: 'Unhandled error', detail: String(e?.message || e) });
+    return json({ error: 'Unsupported method' }, 405)
+  } catch (err) {
+    console.error('[admin-jobs] ERROR', err)
+    return json({ error: String(err?.message ?? err) }, 500)
   }
-};
+}
