@@ -1,10 +1,6 @@
 // netlify/functions/upload.mjs  (Functions v2, ESM)
-// Faithful uploader with schema-aligned fields
-// - OpenAI fallback chain
-// - pairId generation and use (@id in Prisma)
-// - Optional type_a/type_b persisted
-// - Relationship enrichment via LLM or existing MasterRecord
-// - Field names aligned to Prisma schema: relationshipType, relationshipCode, rational, llm_*
+// Enqueue-only uploader: saves blob + creates job, then triggers background worker and returns 202
+// Keeps schema-aligned fields for any metadata we persist to DB
 
 import { getStore } from '@netlify/blobs';
 import { parse as parseCsv } from 'csv-parse/sync';
@@ -20,177 +16,10 @@ const prisma = globalThis.__prisma || new PrismaClient();
 globalThis.__prisma = prisma;
 const { getUserFromRequest } = authUtilsCjs;
 
-// === Relationship categories (exact labels) ===
-const RELATIONSHIP_TYPES = {
-  1: 'A causes B',
-  2: 'B causes A',
-  3: 'A indirectly causes B',
-  4: 'B indirectly causes A',
-  5: 'A and B share common cause',
-  6: 'Treatment of A causes B',
-  7: 'Treatment of B causes A',
-  8: 'A and B have similar initial presentations',
-  9: 'A is subset of B',
-  10: 'B is subset of A',
-  11: 'No clear relationship',
-};
-
-// === Optional type fields normalization ===
-const ALLOWED_TYPES = new Set(['condition', 'procedure', 'medication', 'other']);
-function normalizeOptionalType(v) {
-  if (v == null) return null;
-  const s = String(v).trim().toLowerCase();
-  if (!s) return null;
-  return ALLOWED_TYPES.has(s) ? s : 'other';
-}
-
-// === Model selection with robust fallbacks ===
-const PRIMARY_MODEL = process.env.OPENAI_API_MODEL || 'gpt-4o-mini';
-const MODEL_FALLBACKS = [
-  PRIMARY_MODEL,
-  'gpt-4o-mini',
-  'gpt-4o',
-  'gpt-4.1-mini',
-].filter(Boolean);
-
-// === LLM call (prompt style preserved) ===
-async function classifyRelationship({ conceptAText, conceptBText, events_ab, events_ab_ae }) {
-  const prompt = (
-    `You are an expert diagnostician skilled at identifying clinical relationships between ICD-10-CM diagnosis concepts.\n` +
-    `Statistical indicators provided:\n` +
-    `- events_ab (co-occurrences): ${events_ab}\n` +
-    `- events_ab_ae (actual-to-expected ratio): ${Number(events_ab_ae ?? 0).toFixed(2)}\n\n` +
-    `Interpretation guidelines:\n` +
-    `- ≥ 2.0: Strong statistical evidence; carefully consider relationships.\n` +
-    `- 1.5–1.99: Moderate evidence; cautious evaluation.\n` +
-    `- 1.0–1.49: Weak evidence; rely primarily on clinical knowledge.\n` +
-    `- < 1.0: Minimal evidence; avoid indirect/speculative claims.\n\n` +
-    `Explicit guidelines to avoid speculation:\n` +
-    `- Direct causation: Only if explicit and clinically accepted.\n` +
-    `  Example: Pneumonia causes cough.\n\n` +
-    `- Indirect causation: Only with explicit and named intermediate diagnosis.\n` +
-    `  Example: Pneumonia → sepsis → acute kidney injury.\n\n` +
-    `- Common cause: Only with clearly documented third diagnosis.\n` +
-    `  Example: Obesity clearly causing both diabetes type 2 and osteoarthritis.\n\n` +
-    `- Treatment-caused: Only if explicitly well-documented.\n` +
-    `  Example: Chemotherapy for cancer causing nausea.\n\n` +
-    `- Similar presentations: Only if clinically documented similarity exists.\n\n` +
-    `- Subset relationship: Explicitly broader or unspecified form.\n\n` +
-    `If evidence or explicit documentation is lacking, choose category 11 (No clear relationship).\n\n` +
-    `Classify explicitly the relationship between:\n` +
-    `- Concept A: ${conceptAText}\n` +
-    `- Concept B: ${conceptBText}\n\n` +
-    `Categories:\n` +
-    `1: A causes B\n` +
-    `2: B causes A\n` +
-    `3: A indirectly causes B (explicit intermediate required)\n` +
-    `4: B indirectly causes A (explicit intermediate required)\n` +
-    `5: A and B share common cause (explicit third condition required)\n` +
-    `6: Treatment of A causes B (explicit treatment documentation required)\n` +
-    `7: Treatment of B causes A (explicit treatment documentation required)\n` +
-    `8: A and B have similar initial presentations\n` +
-    `9: A is subset of B\n` +
-    `10: B is subset of A\n` +
-    `11: No clear relationship (default)\n\n` +
-    `Answer exactly as "<number>: <short description>: <concise rationale>".`
-  );
-
-  console.log('[LLM] model candidates:', MODEL_FALLBACKS.join(', '));
-  console.log('[LLM] pair:', conceptAText, '↔', conceptBText);
-  console.log('[LLM] prompt preview:', prompt.slice(0, 280), '...');
-
-  let lastErrText = '';
-  for (const model of MODEL_FALLBACKS) {
-    try {
-      const resp = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({ model, temperature: 0, messages: [{ role: 'user', content: prompt }] }),
-      });
-
-      if (!resp.ok) {
-        const text = await resp.text().catch(() => '');
-        console.error('[LLM] HTTP error', resp.status, text);
-        lastErrText = text;
-        if (resp.status === 403 || resp.status === 404 || /model_not_found/.test(text)) continue; // try next
-        break; // other error; stop trying
-      }
-
-      const data = await resp.json();
-      const reply = data?.choices?.[0]?.message?.content?.trim() || '';
-      console.log('[LLM] raw reply:', reply);
-
-      const parts = reply.split(': ');
-      const relCode = parseInt(parts[0]?.trim(), 10);
-      const relType = (parts[1] || '').trim() || RELATIONSHIP_TYPES[relCode] || RELATIONSHIP_TYPES[11];
-      const rationalText = (parts.slice(2).join(': ') || '').trim() || '—';
-      const safeCode = Number.isFinite(relCode) ? relCode : 11;
-      return { relCode: safeCode, relType, rationalText, usedModel: model };
-    } catch (e) {
-      console.error('[LLM] exception for model', model, e?.message || e);
-      // try next fallback
-    }
-  }
-
-  console.warn('[LLM] all fallbacks failed. defaulting to 11');
-  return {
-    relCode: 11,
-    relType: RELATIONSHIP_TYPES[11],
-    rationalText: lastErrText ? `LLM error: ${lastErrText.slice(0, 200)}` : 'LLM unavailable',
-    usedModel: MODEL_FALLBACKS[0],
-  };
-}
-
-// === Required columns (case-insensitive check) ===
-const REQUIRED_COLUMNS = [
-  'concept_a', 'concept_b', 'concept_a_t', 'concept_b_t',
-  'system_a', 'system_b', 'cooc_event_count', 'lift_lower_95', 'lift_upper_95',
-];
-
-// === helpers ===
-function toCsv(rows, headers) {
-  const esc = (v) => {
-    const s = String(v ?? '');
-    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
-  };
-  const head = headers.join(',');
-  const body = rows.map((r) => headers.map((k) => esc(r[k])).join(',')).join('\n');
-  return head + '\n' + body + (body ? '\n' : '');
-}
 function getExt(filename, mime) {
   if (filename && filename.includes('.')) return filename.toLowerCase().slice(filename.lastIndexOf('.'));
   if (mime && /excel|sheet/i.test(mime)) return '.xlsx';
   return '.csv';
-}
-function numOrZero(v) { const n = Number(v); return Number.isFinite(n) ? n : 0; }
-
-// LLM prompt input bridges
-function pickConceptText(row) {
-  return {
-    a: String(row.concept_a_t ?? row.concept_a ?? '').trim(),
-    b: String(row.concept_b_t ?? row.concept_b ?? '').trim(),
-  };
-}
-function pickEventsAb(row) {
-  const v = row.cooc_event_count ?? row.events_ab ?? row.cooc_obs ?? 0;
-  return Number(v) || 0;
-}
-function pickEventsAe(row) {
-  if (row.events_ab_ae != null) return Number(row.events_ab_ae) || 1.0;
-  if (row.lift != null) return Number(row.lift) || 1.0;
-  const lo = Number(row.lift_lower_95 ?? NaN);
-  const hi = Number(row.lift_upper_95 ?? NaN);
-  if (Number.isFinite(lo) && Number.isFinite(hi)) return (lo + hi) / 2;
-  return 1.0;
-}
-
-// Stable, directional pair key required by Prisma schema
-function makePairId({ system_a, code_a, system_b, code_b }) {
-  const norm = (x) => String(x ?? '').trim().toUpperCase();
-  return [norm(system_a), norm(code_a), norm(system_b), norm(code_b)].join('|');
 }
 
 export default async (req) => {
@@ -214,178 +43,65 @@ export default async (req) => {
     const mimeType = file.type || 'text/csv';
     const buffer = Buffer.from(await file.arrayBuffer());
 
-    const ext = getExt(filename, mimeType);
-    let rows = [];
-    if (ext === '.csv') {
-      rows = parseCsv(buffer.toString('utf-8'), { columns: true, skip_empty_lines: true, trim: true });
-    } else if (ext === '.xlsx' || ext === '.xls') {
-      const wb = XLSX.read(buffer, { type: 'buffer' });
-      const sheet = wb.SheetNames[0];
-      rows = XLSX.utils.sheet_to_json(wb.Sheets[sheet], { defval: '' });
-    } else {
-      return new Response(JSON.stringify({ error: 'Unsupported file type' }), { status: 400, headers: { 'content-type': 'application/json' } });
-    }
-
-    if (!rows.length) {
-      return new Response(JSON.stringify({ error: 'File contains no data' }), { status: 400, headers: { 'content-type': 'application/json' } });
-    }
-
-    // Drop completely blank rows
-    rows = rows.filter((r) => Object.values(r).some((v) => String(v ?? '').trim() !== ''));
-
-    // Required header check (case-insensitive)
-    const header = Object.keys(rows[0]).map((h) => h.toLowerCase());
-    for (const col of REQUIRED_COLUMNS) {
-      if (!header.includes(col)) {
-        return new Response(JSON.stringify({ error: `Missing required column: ${col}` }), { status: 400, headers: { 'content-type': 'application/json' } });
-      }
-    }
-
-    // ——— Process each pair against MasterRecord ———
+    // save input blob
     const uploadsStore = getStore('uploads');
-    const outputsStore = getStore('outputs');
+    const outputsStore = getStore('outputs'); // ensure bucket exists for background writes
 
     const stamp = Date.now();
     const base = (filename || 'file').replace(/\.[^./]+$/, '') || 'file';
     const userId = user.id;
 
+    const ext = getExt(filename, mimeType);
     const uploadKey = `${userId}/${stamp}_${base}${ext}`;
     await uploadsStore.set(uploadKey, buffer, { contentType: mimeType, metadata: { originalName: filename } });
 
-    const enriched = [];
-    let i = 0;
-    for (const row of rows) {
-      i += 1;
+    // create upload + job records
+    const uploadRecord = await prisma.upload.create({
+      data: {
+        userId,
+        blobKey: uploadKey,
+        originalName: filename,
+        store: 'blob',
+        contentType: mimeType,
+        size: buffer.length,
+      },
+    });
 
-      // Normalize identifiers used to key the MasterRecord
-      const system_a = String(row.system_a ?? '').trim();
-      const system_b = String(row.system_b ?? '').trim();
-      const code_a = String(row.code_a ?? row.concept_a ?? '').trim();
-      const code_b = String(row.code_b ?? row.concept_b ?? '').trim();
-      const type_a = normalizeOptionalType(row.type_a);
-      const type_b = normalizeOptionalType(row.type_b);
-      const pairId = makePairId({ system_a, code_a, system_b, code_b });
+    const job = await prisma.job.create({
+      data: {
+        uploadId: uploadRecord.id,
+        status: 'queued',
+        rowsTotal: 0,
+        rowsProcessed: 0,
+        userId,
+        // allow worker to set outputBlobKey if not provided here
+        outputBlobKey: `outputs/${uploadRecord.id}.csv`,
+        createdAt: new Date(),
+      },
+    });
 
-      // Fetch any existing MasterRecord by primary key pairId
-      let existing = null;
-      try {
-        existing = await prisma.masterRecord.findUnique({ where: { pairId } });
-      } catch {
-        existing = await prisma.masterRecord.findFirst({ where: { pairId } });
-      }
-
-      let relCode; let relType; let rationalText;
-
-      if (!existing) {
-        // Build prompt inputs
-        const { a: conceptAText, b: conceptBText } = pickConceptText(row);
-        const events_ab = pickEventsAb(row);
-        const events_ab_ae = pickEventsAe(row);
-
-        // Call LLM only when we don't already have a record
-        const cls = await classifyRelationship({ conceptAText, conceptBText, events_ab, events_ab_ae });
-        relCode = cls.relCode; relType = cls.relType; rationalText = cls.rationalText;
-
-        // Insert MasterRecord seeded with upload values (only required + chosen optional safe ints)
-        await prisma.masterRecord.create({
-          data: {
-            pairId,
-            // clinical concepts & codes
-            concept_a: row.concept_a ?? String(code_a),
-            code_a,
-            concept_b: row.concept_b ?? String(code_b),
-            code_b,
-            system_a,
-            system_b,
-            type_a: typeof type_a === 'string' ? type_a : null,
-            type_b: typeof type_b === 'string' ? type_b : null,
-            // You may also keep concept_a_t / concept_b_t in a different table; not in schema, so omitted
-
-            // relationship fields (schema-aligned)
-            relationshipType: relType,
-            relationshipCode: Number(relCode),
-            rational: rationalText,
-
-            // LLM provenance (schema-aligned)
-            llm_name: 'OpenAI Chat Completions',
-            llm_version: cls.usedModel || PRIMARY_MODEL,
-            llm_date: new Date(),
-
-            // counters (required)
-            cooc_event_count: numOrZero(row.cooc_event_count),
-            source_count: 1,
-
-            // OPTIONAL: accumulate-safe counts if present (nullable in schema)
-            cooc_obs: row.cooc_obs == null ? null : numOrZero(row.cooc_obs),
-            nA: row.nA == null ? null : numOrZero(row.nA),
-            nB: row.nB == null ? null : numOrZero(row.nB),
-            total_persons: row.total_persons == null ? null : numOrZero(row.total_persons),
-            a_before_b: row.a_before_b == null ? null : numOrZero(row.a_before_b),
-            b_before_a: row.b_before_a == null ? null : numOrZero(row.b_before_a),
-          },
-        });
-      } else {
-        // Use stored relationship fields (no LLM call)
-        relCode = Number(existing.relationshipCode ?? 11) || 11;
-        relType = String(existing.relationshipType ?? RELATIONSHIP_TYPES[11]);
-        rationalText = String(existing.rational ?? '');
-
-        // Accumulate counts + source count (safe if some are null)
-        await prisma.masterRecord.update({
-          where: existing?.id ? { id: existing.id } : { pairId },
-          data: {
-            cooc_event_count: numOrZero(existing?.cooc_event_count) + numOrZero(row.cooc_event_count),
-            source_count: numOrZero(existing?.source_count) + 1,
-            // optional counts
-            cooc_obs: (existing?.cooc_obs ?? 0) + (row.cooc_obs == null ? 0 : numOrZero(row.cooc_obs)),
-            nA: (existing?.nA ?? 0) + (row.nA == null ? 0 : numOrZero(row.nA)),
-            nB: (existing?.nB ?? 0) + (row.nB == null ? 0 : numOrZero(row.nB)),
-            total_persons: (existing?.total_persons ?? 0) + (row.total_persons == null ? 0 : numOrZero(row.total_persons)),
-            a_before_b: (existing?.a_before_b ?? 0) + (row.a_before_b == null ? 0 : numOrZero(row.a_before_b)),
-            b_before_a: (existing?.b_before_a ?? 0) + (row.b_before_a == null ? 0 : numOrZero(row.b_before_a)),
-          },
-        });
-      }
-
-      // Enrich output row (use the names you asked for in file output)
-      enriched.push({
-        ...row,
-        type_a: typeof type_a === 'string' ? type_a : '',
-        type_b: typeof type_b === 'string' ? type_b : '',
-        relationship_type: relType,
-        relationship_code: String(relCode),
-        rational: rationalText,
-      });
-
-      if (i === 1 || i % 10 === 0 || i === rows.length) {
-        console.log(`[progress] processed ${i}/${rows.length}`);
-      }
-    }
-
-    // Write enriched CSV
-    const outHeaders = Array.from(
-      enriched.reduce((s, r) => { Object.keys(r).forEach((k) => s.add(k)); return s; }, new Set())
-    );
-    const outputCsv = toCsv(enriched, outHeaders);
-    const outputKey = `${userId}/${stamp}_${base}.enriched.csv`;
-
-    await outputsStore.set(outputKey, Buffer.from(outputCsv), { contentType: 'text/csv', metadata: { source: uploadKey } });
-
-    // Minimal DB bookkeeping
+    // fire-and-forget background run (resumable worker)
     try {
-      const uploadRecord = await prisma.upload.create({
-        data: { userId, blobKey: uploadKey, originalName: filename, store: 'blob', contentType: mimeType, size: buffer.length },
-      });
-      await prisma.job.create({
-        data: { uploadId: uploadRecord.id, status: 'completed', rowsTotal: rows.length, rowsProcessed: rows.length, userId, outputBlobKey: outputKey, createdAt: new Date(), finishedAt: new Date() },
-      });
+      const host = req.headers.get('x-forwarded-host');
+      const proto = req.headers.get('x-forwarded-proto') || 'https';
+      const origin = process.env.URL || (host ? `${proto}://${host}` : '');
+      if (origin) {
+        await fetch(`${origin}/.netlify/functions/process-upload-background`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ jobId: job.id }),
+        });
+      }
     } catch (e) {
-      console.warn('[db] job bookkeeping failed:', e?.message || e);
+      console.warn('[upload] failed to trigger background worker:', e?.message || e);
     }
 
-    return new Response(JSON.stringify({ ok: true, message: 'Upload processed and enriched.', inputBlobKey: uploadKey, outputBlobKey: outputKey, rows: rows.length }), { status: 200, headers: { 'content-type': 'application/json' } });
+    return new Response(
+      JSON.stringify({ ok: true, jobId: job.id, inputBlobKey: uploadKey, outputBlobKey: job.outputBlobKey }),
+      { status: 202, headers: { 'content-type': 'application/json' } }
+    );
   } catch (err) {
-    console.error(err);
+    console.error('[upload] ERROR', err);
     return new Response(JSON.stringify({ error: String(err?.message ?? err) }), { status: 500, headers: { 'content-type': 'application/json' } });
   }
 }
