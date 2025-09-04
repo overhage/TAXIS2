@@ -75,7 +75,35 @@ model Job {
   User          User?     @relation(fields: [userId], references: [id])
 }
 
-// prisma/schema.prisma
+
+
+model OmopCdmConcept {
+concept_id Int @id
+concept_name String @db.VarChar(255)
+domain_id String @db.VarChar(20)
+vocabulary_id String @db.VarChar(20)
+concept_class_id String @db.VarChar(20)
+standard_concept String? @db.Char(1)
+concept_code String @db.VarChar(50)
+valid_start_date DateTime @db.Date
+valid_end_date DateTime @db.Date @default(dbgenerated("DATE '2099-12-31'"))
+invalid_reason String? @db.Char(1)
+
+
+@@unique([concept_id])
+@@map("concept") // maps this Prisma model to the OMOP table name
+}
+
+
+// Notes:
+// - Types/lengths follow OMOP v5.x conventions.
+// - standard_concept and invalid_reason are CHAR(1) and nullable in OMOP.
+// - valid_end_date default mirrors common OMOP practice; if you prefer no default,
+// remove @default(dbgenerated(...)).
+// - The unique constraint (vocabulary_id, concept_code) is standard for OMOP.
+// - If you want camelCase in application code but snake_case in DB, you can use
+// @map on each field to keep DB columns unchanged.
+
 // MasterRecord updated so ONLY these are required:
 //   pairId, concept_a, code_a, system_a, concept_b, code_b, system_b,
 //   relationshipType, relationshipCode, rational,
@@ -119,6 +147,8 @@ model MasterRecord {
   a_before_b       Int?
   /// Count of episodes/subjects where B occurs before A.
   b_before_a       Int?
+    /// Count of episodes/subjects where A occurs on the same day as B.
+  same_day       Int?
 
   /// Expected co-occurrence count assuming independence: (nA * nB) / total_persons.
   expected_obs           Decimal? @db.Decimal(19, 2)

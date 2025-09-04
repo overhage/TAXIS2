@@ -1,14 +1,5 @@
 // netlify/functions/process-upload-background.mjs
-// Merged behavior:
-// 1) Dynamic field mapping from "MasterRecord Fields" (Blobs `config` store)
-//    - CREATE: copy all mapped fields verbatim (guard identity/LLM fields)
-//    - UPDATE: add fields whose Category = "Count"; do NOT touch statistical fields; increment source_count by 1
-// 2) OMOP Concept lookups for code_a/code_b (treated as concept_id)
-//    - concept_a/b ← concept_name
-//    - system_a/b ← vocabulary_id
-//    - type_a/b   ← concept_class_id (falls back to uploaded type_a/b normalized)
-//    - Use derived system_a/system_b + code_a/code_b to build pairId
-// LLM classification still runs ON CREATE only.
+
 
 import { getStore } from '@netlify/blobs'
 import { parse as parseCsv } from 'csv-parse/sync'
@@ -63,6 +54,27 @@ const normalizeOptionalType = (v) => {
 }
 const numOrZero = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0 }
 const makePairId = ({ system_a, code_a, system_b, code_b }) => [system_a, code_a, system_b, code_b].map(x => String(x ?? '').trim().toUpperCase()).join('|')
+
+// Fields that are Ints in Prisma
+const INT_FIELDS = new Set([
+  'cooc_obs','cooc_event_count','a_before_b','same_day','b_before_a',
+  'nA','nB','total_persons','source_count','relationshipCode'
+])
+
+// Fields that are numeric/decimal in Prisma
+const FLOAT_FIELDS = new Set([
+  'lift','lift_lower_95','lift_upper_95','z_score',
+  'ab_h','a_only_h','b_only_h','neither_h',
+  'odds_ratio','or_lower_95','or_upper_95',
+  'directionality_ratio','dir_prop_a_before_b',
+  'dir_lower_95','dir_upper_95',
+  'confidence_a_to_b','confidence_b_to_a'
+])
+
+const toFloatOrNull = (v) => {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
 
 function getExtFromName (name = '') { const i = name.lastIndexOf('.'); return i >= 0 ? name.slice(i).toLowerCase() : '.csv' }
 
@@ -152,10 +164,23 @@ function buildCreateDataFromRow (row, fieldMap) {
   for (const m of fieldMap) {
     const src = row[m.uploadCol]
     if (src === undefined) continue
-    data[m.prismaField] = src
+
+    const field = m.prismaField
+    // Prefer category hints first…
+    if (isCountCategory(m.category)) {
+      data[field] = numOrZero(src)               // Int
+    } else if (isStatCategory(m.category)) {
+      data[field] = toFloatOrNull(src)           // Float/Decimal
+    } else {
+      // …then fall back to explicit field lists to be extra safe
+      if (INT_FIELDS.has(field)) data[field] = numOrZero(src)
+      else if (FLOAT_FIELDS.has(field)) data[field] = toFloatOrNull(src)
+      else data[field] = src ?? null
+    }
   }
   return data
 }
+
 
 function buildUpdateDataFromRow (existing, row, fieldMap) {
   const data = {}
