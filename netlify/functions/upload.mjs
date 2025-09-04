@@ -24,7 +24,7 @@ export const REQUIRED_FIELDS = [
   'cooc_obs',
   'cooc_event_count',
   'a_before_b',
-  'same_day",
+  'same_day',
   'b_before_a',
   'nA',
   'nB',
