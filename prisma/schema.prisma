@@ -85,64 +85,105 @@ model Job {
 // NOTE: field names preserved as in your provided model (camelCase where present).
 
 model MasterRecord {
-  // Identifier for a pair of concepts
+  /// Identifier for a pair of concepts (stable key combining A/B + analysis context).
   pairId String @id
 
-  // Clinical concepts & codes
+  /// Human-readable display/name for concept A.
   concept_a String @db.VarChar(255)
+  /// Code for concept A in the coding system below.
   code_a    String @db.VarChar(20)
+  /// Human-readable display/name for concept B.
   concept_b String @db.VarChar(255)
+  /// Code for concept B in the coding system below.
   code_b    String @db.VarChar(20)
+  /// Coding system for code_a (e.g., SNOMED, ICD10, LOINC).
   system_a  String @db.VarChar(12)
+  /// Coding system for code_b (e.g., SNOMED, ICD10, LOINC).
   system_b  String @db.VarChar(12)
-  type_a    String? @db.VarChar(20)   // optional
-  type_b    String? @db.VarChar(20)   // optional
+  /// Optional type/classification for concept A (e.g., condition, procedure).
+  type_a    String? @db.VarChar(20)
+  /// Optional type/classification for concept B (e.g., condition, procedure).
+  type_b    String? @db.VarChar(20)
 
-  // Counts & frequencies
-  cooc_obs         Int?   // optional
-  nA               Int?   // optional
-  nB               Int?   // optional
-  total_persons    Int?   // optional
-  cooc_event_count Int     // REQUIRED
-  a_before_b       Int?   // optional
-  b_before_a       Int?   // optional
+  /// Observed count of episodes/subjects where A and B co-occur within the analysis window.
+  cooc_obs         Int?
+  /// Count of episodes/subjects where A occurs (regardless of B).
+  nA               Int?
+  /// Count of episodes/subjects where B occurs (regardless of A).
+  nB               Int?
+  /// Denominator used for expectations/proportions (e.g., distinct persons or episodes analyzed).
+  total_persons    Int?
+  /// Number of co-occurrence events observed (e.g., pairwise event windows) used as event-level denominator.
+  cooc_event_count Int
+  /// Count of episodes/subjects where A occurs before B.
+  a_before_b       Int?
+  /// Count of episodes/subjects where B occurs before A.
+  b_before_a       Int?
 
-  // Statistical measures (now optional)
+  /// Expected co-occurrence count assuming independence: (nA * nB) / total_persons.
   expected_obs           Decimal? @db.Decimal(19, 2)
+  /// Lift = cooc_obs / expected_obs. 1 = independence; >1 positive association; <1 negative association.
   lift                   Decimal? @db.Decimal(19, 4)
+  /// 95% lower confidence bound for `lift`.
   lift_lower_95          Decimal? @db.Decimal(19, 4)
+  /// 95% upper confidence bound for `lift`.
   lift_upper_95          Decimal? @db.Decimal(19, 4)
+  /// Z-score measuring the strength/direction of association between A and B.
   z_score                Decimal? @db.Decimal(19, 4)
+  /// Contingency cell: count where both A and B occur (A ∩ B).
   ab_h                   Decimal? @db.Decimal(19, 2)
+  /// Contingency cell: count where only A occurs (A \ B).
   a_only_h               Decimal? @db.Decimal(19, 2)
+  /// Contingency cell: count where only B occurs (B \ A).
   b_only_h               Decimal? @db.Decimal(19, 2)
+  /// Contingency cell: count where neither A nor B occurs (¬A ∩ ¬B).
   neither_h              Decimal? @db.Decimal(19, 2)
+  /// Odds ratio = (ab_h * neither_h) / (a_only_h * b_only_h).
   odds_ratio             Decimal? @db.Decimal(19, 4)
+  /// 95% lower confidence bound for `odds_ratio`.
   or_lower_95            Decimal? @db.Decimal(19, 4)
+  /// 95% upper confidence bound for `odds_ratio`.
   or_upper_95            Decimal? @db.Decimal(19, 4)
+  /// Directionality ratio: tendency of A to precede B vs. B to precede A among those with both.
   directionality_ratio   Decimal? @db.Decimal(19, 4)
+  /// Proportion of A→B orderings among episodes with both events (0..1).
   dir_prop_a_before_b    Decimal? @db.Decimal(19, 4)
+  /// 95% lower confidence bound for `dir_prop_a_before_b`.
   dir_lower_95           Decimal? @db.Decimal(19, 4)
+  /// 95% upper confidence bound for `dir_prop_a_before_b`.
   dir_upper_95           Decimal? @db.Decimal(19, 4)
+  /// Confidence A→B = P(B | A).
   confidence_a_to_b      Decimal? @db.Decimal(19, 4)
+  /// Confidence B→A = P(A | B).
   confidence_b_to_a      Decimal? @db.Decimal(19, 4)
 
-  // Relationship fields (REQUIRED)
+  /// Relationship type/label assigned to this pair (taxonomy/ontology string).
   relationshipType String @db.VarChar(64)
+  /// Normalized numeric code for the relationship type above.
   relationshipCode Int
+  /// Free-text rationale/notes for this relationship (field name kept as `rational`).
   rational         String @db.VarChar(1024)
 
-  // Metadata
+  /// Number of distinct source datasets/pipelines contributing evidence for this record.
   source_count Int
+  /// Timestamp when an LLM assessment was performed (if any).
   llm_date     DateTime?
+  /// Model name used for LLM assessment (e.g., "gpt-4.1").
   llm_name     String?  @db.VarChar(100)
+  /// Model version/variant used for LLM assessment.
   llm_version  String?  @db.VarChar(50)
+  /// Timestamp when a human review was performed (if any).
   human_date   DateTime?
+  /// Reviewer name/email/identifier for human validation (if any).
   human_reviewer String?  @db.VarChar(254)
+  /// Reviewer comment/notes (if any).
   human_comment  String?  @db.VarChar(255)
-  status         String?  @db.VarChar(12)  // optional for now
+  /// Workflow status for this record (e.g., proposed, accepted, rejected).
+  status         String?  @db.VarChar(12)
 
+  /// Record creation timestamp.
   createdAt   DateTime @default(now())
+  /// Record last update timestamp (auto-managed).
   updatedAt   DateTime @updatedAt
 
   @@index([code_a, system_a])
