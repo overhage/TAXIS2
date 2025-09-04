@@ -53,6 +53,66 @@ export default async (req) => {
 
     const ext = getExt(filename, mimeType);
     const uploadKey = `${userId}/${stamp}_${base}${ext}`;
+
+// validate the uploaded file
+
+const allowedExt = new Set(['.csv', '.xlsx', '.xls']);
+if (!allowedExt.has(ext)) {
+  return new Response(
+    JSON.stringify({ error: `Unsupported file type ${ext}. Upload a CSV or Excel file (.xlsx/.xls).` }),
+    { status: 400, headers: { 'content-type': 'application/json' } }
+  );
+}
+
+// Parse just enough to validate header + row count
+let header = [];
+let rowCount = 0;
+
+try {
+  if (ext === '.csv') {
+    const text = buffer.toString('utf8');
+    // arrays-of-arrays; first row is header
+    const rows = parseCsv(text, { bom: true, relax_column_count: true, skip_empty_lines: true });
+    if (!rows?.length) {
+      return new Response(JSON.stringify({ error: 'Empty file.' }), { status: 400, headers: { 'content-type': 'application/json' } });
+    }
+    header = (rows[0] || []).map(h => String(h).trim());
+    rowCount = Math.max(0, rows.length - 1);
+  } else {
+    // Excel (XLSX/XLS)
+    const wb = XLSX.read(buffer, { type: 'buffer' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }); // first row = header
+    header = (aoa[0] || []).map(h => String(h).trim());
+    rowCount = Math.max(0, (aoa.length || 0) - 1);
+  }
+} catch (e) {
+  return new Response(JSON.stringify({ error: `Failed to parse file: ${String(e?.message || e)}` }),
+    { status: 400, headers: { 'content-type': 'application/json' } });
+}
+
+const requiredColumns = [
+'concept_a',	'concept_b',	'cooc_obs',	'cooc_event_count',	'a_before_b',	'same_day',	'b_before_a',	'nA',	'nB',	'total_persons',
+];
+
+const headerSet = new Set(header.map(h => h.toLowerCase()));
+const missing = requiredColumns.filter(c => !headerSet.has(c.toLowerCase()));
+
+if (missing.length) {
+  return new Response(
+    JSON.stringify({ error: 'Missing required columns', missing, header }),
+    { status: 400, headers: { 'content-type': 'application/json' } }
+  );
+}
+
+if (rowCount < 1) {
+  return new Response(
+    JSON.stringify({ error: 'No data rows found (need ≥ 1 row under the header).' }),
+    { status: 400, headers: { 'content-type': 'application/json' } }
+  );
+}
+
+
     await uploadsStore.set(uploadKey, buffer, { contentType: mimeType, metadata: { originalName: filename } });
 
     // create upload + job records

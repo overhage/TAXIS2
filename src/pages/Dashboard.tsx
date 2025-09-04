@@ -229,7 +229,7 @@ const DashboardPage: React.FC = () => {
             <section>
               <h2 style={{ fontSize: '1.25rem', marginBottom: '0.5rem' }}>Upload New File</h2>
               <p style={{ fontSize: '0.875rem', marginBottom: '0.5rem' }}>
-                Please upload a CSV or Excel file with a header row containing the columns: <code>concept_a</code>, <code>concept_b</code>, <code>concept_a_t</code>, <code>concept_b_t</code>, <code>system_a</code>, <code>system_b</code>, <code>cooc_event_count</code>, <code>lift_lower_95</code>, and <code>lift_upper_95</code>. At least one data row is required.
+                Please upload a CSV or Excel file with a header row containing the columns: <code>concept_a</code>, <code>concept_b</code>, <code>cooc_obs</code>, <code>COOC_event_count</code>, <code>a_before_b</code>, <code>same_day</code>, <code>b_before_a</code>, <code>nA</code>, <code>nB</code></code>and <code>total_persons</code>. At least one data row is required.
               </p>
               <input type="file" accept=".csv,.xlsx,.xls" onChange={handleFileChange} style={{ marginBottom: '0.5rem' }} />
               <br />
