@@ -41,3 +41,4 @@ uploads/*
 # zips and other local bundles
 *.zip
 public/CONCEPT.csv
+netlify/functions/process-upload-background 4 sep 2025.txt
