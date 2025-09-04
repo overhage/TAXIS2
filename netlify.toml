@@ -16,10 +16,6 @@ included_files = [
   "node_modules/@prisma/client/**"
 ]
 
-[[redirects]]
-from = "/.netlify/functions/*"
-to = "/.netlify/functions/:splat"
-status = 200
 
 [[redirects]]
 from = "/api/*"
