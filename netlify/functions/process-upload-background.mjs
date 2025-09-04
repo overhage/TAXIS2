@@ -1,26 +1,45 @@
-// netlify/functions/process-upload-background.mjs (no lastHeartbeat)
-// Patch: remove writes to non-existent Job.lastHeartbeat; use startedAt/finishedAt instead.
-// Also keeps LLM cache logging and single-CSV output from prior version.
+// netlify/functions/process-upload-background.mjs
+// Merged behavior:
+// 1) Dynamic field mapping from "MasterRecord Fields" (Blobs `config` store)
+//    - CREATE: copy all mapped fields verbatim (guard identity/LLM fields)
+//    - UPDATE: add fields whose Category = "Count"; do NOT touch statistical fields; increment source_count by 1
+// 2) OMOP Concept lookups for code_a/code_b (treated as concept_id)
+//    - concept_a/b ← concept_name
+//    - system_a/b ← vocabulary_id
+//    - type_a/b   ← concept_class_id (falls back to uploaded type_a/b normalized)
+//    - Use derived system_a/system_b + code_a/code_b to build pairId
+// LLM classification still runs ON CREATE only.
 
-import { getStore } from '@netlify/blobs';
-import { parse as parseCsv } from 'csv-parse/sync';
-import * as XLSX from 'xlsx';
-import { PrismaClient } from '@prisma/client';
+import { getStore } from '@netlify/blobs'
+import { parse as parseCsv } from 'csv-parse/sync'
+import * as XLSX from 'xlsx'
+import { PrismaClient } from '@prisma/client'
 
-const prisma = globalThis.__prisma || new PrismaClient();
+const prisma = globalThis.__prisma || new PrismaClient()
 // @ts-ignore
-globalThis.__prisma = prisma;
+globalThis.__prisma = prisma
 
 // ===== Configs =====
-const MAX_RUN_MS = Number(process.env.MAX_RUN_MS || 12 * 60 * 1000); // ~12 minutes
-const FLUSH_EVERY_ROWS = Number(process.env.FLUSH_EVERY_ROWS || 50);
-const FLUSH_EVERY_MS = Number(process.env.FLUSH_EVERY_MS || 5000);
-const PRIMARY_MODEL = process.env.OPENAI_API_MODEL || 'gpt-4o-mini';
-const MODEL_FALLBACKS = [PRIMARY_MODEL, 'gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini'].filter(Boolean);
-const LLM_CACHE_STORE = process.env.LLM_CACHE_STORE || 'cache';
-const LLM_CACHE_BLOB_KEY = process.env.LLM_CACHE_BLOB_KEY || 'llmcache.csv';
+const MAX_RUN_MS = Number(process.env.MAX_RUN_MS || 12 * 60 * 1000)
+const FLUSH_EVERY_ROWS = Number(process.env.FLUSH_EVERY_ROWS || 50)
+const FLUSH_EVERY_MS = Number(process.env.FLUSH_EVERY_MS || 5000)
+const PRIMARY_MODEL = process.env.OPENAI_API_MODEL || 'gpt-4o-mini'
+const MODEL_FALLBACKS = [PRIMARY_MODEL, 'gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini'].filter(Boolean)
+const LLM_CACHE_STORE = process.env.LLM_CACHE_STORE || 'cache'
+const LLM_CACHE_BLOB_KEY = process.env.LLM_CACHE_BLOB_KEY || 'llmcache.csv'
 
-// ===== Relationship categories =====
+// Where to find the MasterRecord mapping spreadsheet
+const CONFIG_STORE = process.env.CONFIG_STORE || 'config'
+const FIELD_MAP_CANDIDATE_KEYS = [
+  'MasterRecord Fields.xlsx',
+  'MasterRecord Fields.csv',
+  'masterrecord_fields.xlsx',
+  'masterrecord_fields.csv',
+  'MasterRecordFields.xlsx',
+  'MasterRecordFields.csv'
+]
+
+// ===== Relationship categories (unchanged) =====
 const RELATIONSHIP_TYPES = {
   1: 'A causes B',
   2: 'B causes A',
@@ -32,48 +51,159 @@ const RELATIONSHIP_TYPES = {
   8: 'A and B have similar initial presentations',
   9: 'A is subset of B',
   10: 'B is subset of A',
-  11: 'No clear relationship',
-};
+  11: 'No clear relationship'
+}
 
-const ALLOWED_TYPES = new Set(['condition', 'procedure', 'medication', 'other']);
+const ALLOWED_TYPES = new Set(['condition', 'procedure', 'medication', 'other'])
 const normalizeOptionalType = (v) => {
-  if (v == null) return null;
-  const s = String(v).trim().toLowerCase();
-  if (!s) return null;
-  return ALLOWED_TYPES.has(s) ? s : 'other';
-};
-const numOrZero = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
-const makePairId = ({ system_a, code_a, system_b, code_b }) => [system_a, code_a, system_b, code_b].map(x => String(x ?? '').trim().toUpperCase()).join('|');
+  if (v == null) return null
+  const s = String(v).trim().toLowerCase()
+  if (!s) return null
+  return ALLOWED_TYPES.has(s) ? s : 'other'
+}
+const numOrZero = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0 }
+const makePairId = ({ system_a, code_a, system_b, code_b }) => [system_a, code_a, system_b, code_b].map(x => String(x ?? '').trim().toUpperCase()).join('|')
 
-function getExtFromName(name = '') { const i = name.lastIndexOf('.'); return i >= 0 ? name.slice(i).toLowerCase() : '.csv'; }
+function getExtFromName (name = '') { const i = name.lastIndexOf('.'); return i >= 0 ? name.slice(i).toLowerCase() : '.csv' }
 
-function parseUploadBufferToRows(buffer, originalName) {
-  const ext = getExtFromName(originalName);
+function parseUploadBufferToRows (buffer, originalName) {
+  const ext = getExtFromName(originalName)
   if (ext === '.csv') {
-    const text = Buffer.from(buffer).toString('utf-8');
-    return parseCsv(text, { columns: true, skip_empty_lines: true, trim: true });
+    const text = Buffer.from(buffer).toString('utf-8')
+    return parseCsv(text, { columns: true, skip_empty_lines: true, trim: true })
   }
   if (ext === '.xlsx' || ext === '.xls') {
-    const wb = XLSX.read(buffer, { type: 'buffer' });
-    const sheet = wb.SheetNames[0];
-    return XLSX.utils.sheet_to_json(wb.Sheets[sheet], { defval: '' });
+    const wb = XLSX.read(buffer, { type: 'buffer' })
+    const sheet = wb.SheetNames[0]
+    return XLSX.utils.sheet_to_json(wb.Sheets[sheet], { defval: '' })
   }
-  throw new Error(`Unsupported file type: ${ext}`);
+  throw new Error(`Unsupported file type: ${ext}`)
 }
 
-function pickConceptText(row) {
-  return { a: String(row.concept_a_t ?? row.concept_a ?? '').trim(), b: String(row.concept_b_t ?? row.concept_b ?? '').trim() };
-}
-function pickEventsAb(row) { const v = row.cooc_event_count ?? row.events_ab ?? row.cooc_obs ?? 0; return Number(v) || 0; }
-function pickEventsAe(row) {
-  if (row.events_ab_ae != null) return Number(row.events_ab_ae) || 1.0;
-  if (row.lift != null) return Number(row.lift) || 1.0;
-  const lo = Number(row.lift_lower_95 ?? NaN), hi = Number(row.lift_upper_95 ?? NaN);
-  if (Number.isFinite(lo) && Number.isFinite(hi)) return (lo + hi) / 2;
-  return 1.0;
+function pickEventsAb (row) { const v = row.cooc_event_count ?? row.events_ab ?? row.cooc_obs ?? 0; return Number(v) || 0 }
+function pickEventsAe (row) {
+  if (row.events_ab_ae != null) return Number(row.events_ab_ae) || 1.0
+  if (row.lift != null) return Number(row.lift) || 1.0
+  const lo = Number(row.lift_lower_95 ?? NaN), hi = Number(row.lift_upper_95 ?? NaN)
+  if (Number.isFinite(lo) && Number.isFinite(hi)) return (lo + hi) / 2
+  return 1.0
 }
 
-async function classifyRelationship({ conceptAText, conceptBText, events_ab, events_ab_ae }) {
+// ===== Field map loader =====
+const normalizeKey = (s) => String(s || '').trim()
+const lc = (s) => normalizeKey(s).toLowerCase()
+const looksLike = (s, ...needles) => {
+  const L = lc(s)
+  return needles.some(n => L.includes(n))
+}
+
+async function loadFieldMap () {
+  const store = getStore(CONFIG_STORE)
+  for (const key of FIELD_MAP_CANDIDATE_KEYS) {
+    try {
+      const buf = await store.get(key, { type: 'arrayBuffer' })
+      if (!buf) continue
+      const ext = getExtFromName(key)
+      let rows
+      if (ext === '.csv') {
+        const text = Buffer.from(buf).toString('utf-8')
+        rows = parseCsv(text, { columns: true, skip_empty_lines: true, trim: true })
+      } else {
+        const wb = XLSX.read(buf, { type: 'buffer' })
+        const sheet = wb.SheetNames[0]
+        rows = XLSX.utils.sheet_to_json(wb.Sheets[sheet], { defval: '' })
+      }
+      if (!rows || rows.length === 0) continue
+
+      const header = Object.keys(rows[0] || {})
+      const findCol = (predicates) => header.find(h => predicates(lc(h)))
+      const uploadColName = findCol(h => looksLike(h, 'upload spreadsheet column', 'upload', 'spreadsheet'))
+      const prismaColName = findCol(h => looksLike(h, 'prisma master', 'prisma mater', 'prisma', 'field'))
+      const categoryColName = findCol(h => looksLike(h, 'category'))
+      if (!uploadColName || !prismaColName) {
+        console.warn('[field-map] Missing expected headers in', key, header)
+        continue
+      }
+      const map = []
+      for (const r of rows) {
+        const upload = normalizeKey(r[uploadColName])
+        const prisma = normalizeKey(r[prismaColName])
+        const category = normalizeKey(categoryColName ? r[categoryColName] : '')
+        if (!upload || !prisma) continue
+        map.push({ uploadCol: upload, prismaField: prisma, category })
+      }
+      if (map.length) {
+        console.log(`[field-map] loaded ${map.length} mappings from`, key)
+        return map
+      }
+    } catch (e) {
+      console.warn('[field-map] failed to load', key, e?.message || e)
+    }
+  }
+  console.warn('[field-map] No mapping file found in config store; falling back to legacy behavior')
+  return []
+}
+
+const isCountCategory = (c) => /^(count|counts)$/i.test(String(c || ''))
+const isStatCategory = (c) => /^stat/i.test(String(c || '')) // e.g., 'Stat', 'Statistical'
+
+function buildCreateDataFromRow (row, fieldMap) {
+  const data = {}
+  for (const m of fieldMap) {
+    const src = row[m.uploadCol]
+    if (src === undefined) continue
+    data[m.prismaField] = src
+  }
+  return data
+}
+
+function buildUpdateDataFromRow (existing, row, fieldMap) {
+  const data = {}
+  for (const m of fieldMap) {
+    const src = row[m.uploadCol]
+    if (src === undefined) continue
+    const field = m.prismaField
+    if (isCountCategory(m.category)) {
+      data[field] = numOrZero(existing?.[field]) + numOrZero(src)
+    } else if (isStatCategory(m.category)) {
+      // skip statistical fields
+      continue
+    } else {
+      const cur = existing?.[field]
+      const isEmpty = cur === null || cur === undefined || (typeof cur === 'string' && cur.trim() === '')
+      if (isEmpty) data[field] = src
+    }
+  }
+  data.source_count = numOrZero(existing?.source_count) + 1
+  return data
+}
+
+// ===== OMOP Concept lookup =====
+const conceptCache = new Map()
+async function lookupConceptMeta (conceptId) {
+  const cid = Number(conceptId)
+  if (!Number.isFinite(cid)) return null
+  if (conceptCache.has(cid)) return conceptCache.get(cid)
+  try {
+    const c = await prisma.concept.findUnique({ where: { concept_id: cid } })
+      .catch(async () => await prisma.concept.findFirst({ where: { concept_id: cid } }))
+    if (!c) { conceptCache.set(cid, null); return null }
+    const meta = { concept_name: c.concept_name || '', vocabulary_id: c.vocabulary_id || '', concept_class_id: c.concept_class_id || '' }
+    conceptCache.set(cid, meta)
+    return meta
+  } catch {
+    conceptCache.set(cid, null)
+    return null
+  }
+}
+function coalesceType (metaClassId, uploadType) {
+  if (metaClassId && String(metaClassId).trim()) return String(metaClassId)
+  const n = normalizeOptionalType(uploadType)
+  return typeof n === 'string' ? n : null
+}
+
+// ===== LLM classification (unchanged) =====
+async function classifyRelationship ({ conceptAText, conceptBText, events_ab, events_ab_ae }) {
   const prompt = (
     `You are an expert diagnostician skilled at identifying clinical relationships between ICD-10-CM diagnosis concepts.\n` +
     `Statistical indicators provided:\n` +
@@ -102,152 +232,189 @@ async function classifyRelationship({ conceptAText, conceptBText, events_ab, eve
     `Categories:\n` +
     `1: A causes B\n2: B causes A\n3: A indirectly causes B (explicit intermediate required)\n4: B indirectly causes A (explicit intermediate required)\n5: A and B share common cause (explicit third condition required)\n6: Treatment of A causes B (explicit treatment documentation required)\n7: Treatment of B causes A (explicit treatment documentation required)\n8: A and B have similar initial presentations\n9: A is subset of B\n10: B is subset of A\n11: No clear relationship (default)\n\n` +
     `Answer exactly as "<number>: <short description>: <concise rationale>".`
-  );
+  )
 
-  console.log('[LLM] model candidates:', MODEL_FALLBACKS.join(', '));
-  let lastErrText = '';
+  console.log('[LLM] model candidates:', MODEL_FALLBACKS.join(', '))
+  let lastErrText = ''
   for (const model of MODEL_FALLBACKS) {
     try {
       const resp = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: { authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ model, temperature: 0, messages: [{ role: 'user', content: prompt }] }),
-      });
+        body: JSON.stringify({ model, temperature: 0, messages: [{ role: 'user', content: prompt }] })
+      })
       if (!resp.ok) {
-        const text = await resp.text().catch(() => '');
-        console.error('[LLM] HTTP error', resp.status, text);
-        lastErrText = text;
-        if (resp.status === 403 || resp.status === 404 || /model_not_found/.test(text)) continue;
-        break;
+        const text = await resp.text().catch(() => '')
+        console.error('[LLM] HTTP error', resp.status, text)
+        lastErrText = text
+        if (resp.status === 403 || resp.status === 404 || /model_not_found/.test(text)) continue
+        break
       }
-      const data = await resp.json();
-      const reply = data?.choices?.[0]?.message?.content?.trim() || '';
-      const parts = reply.split(': ');
-      const relCode = parseInt(parts[0]?.trim(), 10);
-      const relType = (parts[1] || '').trim() || RELATIONSHIP_TYPES[relCode] || RELATIONSHIP_TYPES[11];
-      const rationalText = (parts.slice(2).join(': ') || '').trim() || '—';
-      const safeCode = Number.isFinite(relCode) ? relCode : 11;
-      const usage = data?.usage || {};
-      return { relCode: safeCode, relType, rationalText, usedModel: model, usage };
+      const data = await resp.json()
+      const reply = data?.choices?.[0]?.message?.content?.trim() || ''
+      const parts = reply.split(': ')
+      const relCode = parseInt(parts[0]?.trim(), 10)
+      const relType = (parts[1] || '').trim() || RELATIONSHIP_TYPES[relCode] || RELATIONSHIP_TYPES[11]
+      const rationalText = (parts.slice(2).join(': ') || '').trim() || '—'
+      const safeCode = Number.isFinite(relCode) ? relCode : 11
+      const usage = data?.usage || {}
+      return { relCode: safeCode, relType, rationalText, usedModel: model, usage }
     } catch (e) {
-      console.error('[LLM] exception for model', model, e?.message || e);
+      console.error('[LLM] exception for model', model, e?.message || e)
     }
   }
-  return { relCode: 11, relType: RELATIONSHIP_TYPES[11], rationalText: lastErrText ? `LLM error: ${lastErrText.slice(0, 200)}` : 'LLM unavailable', usedModel: MODEL_FALLBACKS[0], usage: {} };
+  return { relCode: 11, relType: RELATIONSHIP_TYPES[11], rationalText: lastErrText ? `LLM error: ${lastErrText.slice(0, 200)}` : 'LLM unavailable', usedModel: MODEL_FALLBACKS[0], usage: {} }
 }
 
-function ensureHeader(existingCsvText, headersFromSample) {
+function ensureHeader (existingCsvText, headersFromSample) {
   if (existingCsvText && existingCsvText.length > 0) {
-    const firstNl = existingCsvText.indexOf('\n');
-    const headerLine = firstNl >= 0 ? existingCsvText.slice(0, firstNl) : existingCsvText;
-    const headers = headerLine.split(',');
-    return { headers, csvText: existingCsvText, headerExists: true };
+    const firstNl = existingCsvText.indexOf('\n')
+    const headerLine = firstNl >= 0 ? existingCsvText.slice(0, firstNl) : existingCsvText
+    const headers = headerLine.split(',')
+    return { headers, csvText: existingCsvText, headerExists: true }
   }
-  const uniq = Array.from(new Set(headersFromSample || []));
-  const headerLine = uniq.join(',') + '\n';
-  return { headers: uniq, csvText: headerLine, headerExists: false };
+  const uniq = Array.from(new Set(headersFromSample || []))
+  const headerLine = uniq.join(',') + '\n'
+  return { headers: uniq, csvText: headerLine, headerExists: false }
 }
 
-function rowToCsvLine(row, headers) {
-  const esc = (v) => { const s = String(v ?? ''); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
-  return headers.map((h) => esc(row[h])).join(',');
+function rowToCsvLine (row, headers) {
+  const esc = (v) => { const s = String(v ?? ''); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s }
+  return headers.map((h) => esc(row[h])).join(',')
 }
 
 export default async (req) => {
   try {
-    if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405, headers: { 'content-type': 'text/plain; charset=utf-8' } });
-    const { jobId } = await req.json();
-    if (!jobId) return new Response(JSON.stringify({ error: 'Missing jobId' }), { status: 400, headers: { 'content-type': 'application/json' } });
+    if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405, headers: { 'content-type': 'text/plain; charset=utf-8' } })
+    const { jobId } = await req.json()
+    if (!jobId) return new Response(JSON.stringify({ error: 'Missing jobId' }), { status: 400, headers: { 'content-type': 'application/json' } })
 
-    const job = await prisma.job.findUnique({ where: { id: jobId } });
-    if (!job) return new Response(JSON.stringify({ error: 'Job not found' }), { status: 404, headers: { 'content-type': 'application/json' } });
-    if (job.status === 'completed' || job.status === 'failed') return new Response(JSON.stringify({ ok: true, status: job.status }), { status: 202, headers: { 'content-type': 'application/json' } });
+    const job = await prisma.job.findUnique({ where: { id: jobId } })
+    if (!job) return new Response(JSON.stringify({ error: 'Job not found' }), { status: 404, headers: { 'content-type': 'application/json' } })
+    if (job.status === 'completed' || job.status === 'failed') return new Response(JSON.stringify({ ok: true, status: job.status }), { status: 202, headers: { 'content-type': 'application/json' } })
 
-    // Mark running; set startedAt if not previously set
-    await prisma.job.update({ where: { id: jobId }, data: { status: 'running', startedAt: job.startedAt ?? new Date() } });
+    await prisma.job.update({ where: { id: jobId }, data: { status: 'running', startedAt: job.startedAt ?? new Date() } })
 
-    const upload = await prisma.upload.findUnique({ where: { id: job.uploadId } });
-    if (!upload) throw new Error('Upload record not found');
+    const upload = await prisma.upload.findUnique({ where: { id: job.uploadId } })
+    if (!upload) throw new Error('Upload record not found')
 
-    const uploadsStore = getStore('uploads');
-    const outputsStore = getStore('outputs');
-    const cacheStore = getStore(LLM_CACHE_STORE);
+    const uploadsStore = getStore('uploads')
+    const outputsStore = getStore('outputs')
+    const cacheStore = getStore(LLM_CACHE_STORE)
 
-    const buffer = await uploadsStore.get(upload.blobKey, { type: 'arrayBuffer' });
-    if (!buffer) throw new Error('Uploaded blob not found');
+    const buffer = await uploadsStore.get(upload.blobKey, { type: 'arrayBuffer' })
+    if (!buffer) throw new Error('Uploaded blob not found')
 
-    const rows = parseUploadBufferToRows(buffer, upload.originalName || upload.blobKey);
+    const rows = parseUploadBufferToRows(buffer, upload.originalName || upload.blobKey)
 
-    const rowsTotal = job.rowsTotal && job.rowsTotal > 0 ? job.rowsTotal : rows.length;
-    if (rowsTotal !== job.rowsTotal) await prisma.job.update({ where: { id: jobId }, data: { rowsTotal } });
+    // Load field mapping once per run (may be empty)
+    const fieldMap = await loadFieldMap()
 
-    let offset = job.rowsProcessed || 0;
+    const rowsTotal = job.rowsTotal && job.rowsTotal > 0 ? job.rowsTotal : rows.length
+    if (rowsTotal !== job.rowsTotal) await prisma.job.update({ where: { id: jobId }, data: { rowsTotal } })
+
+    let offset = job.rowsProcessed || 0
     if (offset >= rowsTotal) {
-      await prisma.job.update({ where: { id: jobId }, data: { status: 'completed', finishedAt: new Date() } });
-      return new Response(JSON.stringify({ ok: true, status: 'completed' }), { status: 202, headers: { 'content-type': 'application/json' } });
+      await prisma.job.update({ where: { id: jobId }, data: { status: 'completed', finishedAt: new Date() } })
+      return new Response(JSON.stringify({ ok: true, status: 'completed' }), { status: 202, headers: { 'content-type': 'application/json' } })
     }
 
-    const outputBlobKey = job.outputBlobKey || `outputs/${jobId}.csv`;
-    if (!job.outputBlobKey) await prisma.job.update({ where: { id: jobId }, data: { outputBlobKey } });
+    const outputBlobKey = job.outputBlobKey || `outputs/${jobId}.csv`
+    if (!job.outputBlobKey) await prisma.job.update({ where: { id: jobId }, data: { outputBlobKey } })
 
-    // Load existing main CSV once per run
-    let mainCsvText = (await outputsStore.get(outputBlobKey, { type: 'text' })) || '';
+    let mainCsvText = (await outputsStore.get(outputBlobKey, { type: 'text' })) || ''
 
-    // LLM cache prep
-    let llmCacheText = null;
-    let llmCacheHeaders = ['timestamp','jobId','uploadId','userId','rowIndex','pairId','system_a','code_a','system_b','code_b','concept_a_t','concept_b_t','model','relationship_code','relationship_type','prompt_tokens','completion_tokens','total_tokens'];
-    const llmCacheBatch = [];
+    let llmCacheText = null
+    let llmCacheHeaders = ['timestamp','jobId','uploadId','userId','rowIndex','pairId','system_a','code_a','system_b','code_b','concept_a_t','concept_b_t','model','relationship_code','relationship_type','prompt_tokens','completion_tokens','total_tokens']
+    const llmCacheBatch = []
 
-    const start = Date.now();
-    let lastFlush = Date.now();
-    let processedThisRun = 0;
-    let mainHeader = null; // string[]
+    const start = Date.now()
+    let lastFlush = Date.now()
+    let processedThisRun = 0
+    let mainHeader = null
 
     for (; offset < rowsTotal; offset++) {
-      const row = rows[offset];
-      const system_a = String(row.system_a ?? '').trim();
-      const system_b = String(row.system_b ?? '').trim();
-      const code_a = String(row.code_a ?? row.concept_a ?? '').trim();
-      const code_b = String(row.code_b ?? row.concept_b ?? '').trim();
-      const type_a = normalizeOptionalType(row.type_a);
-      const type_b = normalizeOptionalType(row.type_b);
-      const pairId = makePairId({ system_a, code_a, system_b, code_b });
+      const row = rows[offset]
+      // Raw values from upload
+      const system_a_raw = String(row.system_a ?? '').trim()
+      const system_b_raw = String(row.system_b ?? '').trim()
+      const code_a_raw = String(row.code_a ?? row.concept_a ?? '').trim()
+      const code_b_raw = String(row.code_b ?? row.concept_b ?? '').trim()
+      const type_a_raw = row.type_a
+      const type_b_raw = row.type_b
 
-      let existing = null;
-      try { existing = await prisma.masterRecord.findUnique({ where: { pairId } }); } catch { existing = await prisma.masterRecord.findFirst({ where: { pairId } }); }
+      // OMOP lookups by concept_id
+      const [metaA, metaB] = await Promise.all([
+        lookupConceptMeta(code_a_raw),
+        lookupConceptMeta(code_b_raw)
+      ])
 
-      let relCode, relType, rationalText, usedModel, usage;
+      // Effective values (prefer OMOP)
+      const code_a = code_a_raw
+      const code_b = code_b_raw
+      const concept_a_name = (metaA?.concept_name || '').trim() || String(row.concept_a ?? code_a)
+      const concept_b_name = (metaB?.concept_name || '').trim() || String(row.concept_b ?? code_b)
+      const system_a_eff = (metaA?.vocabulary_id || '').trim() || system_a_raw
+      const system_b_eff = (metaB?.vocabulary_id || '').trim() || system_b_raw
+      const type_a_eff = coalesceType(metaA?.concept_class_id, type_a_raw)
+      const type_b_eff = coalesceType(metaB?.concept_class_id, type_b_raw)
+
+      const pairId = makePairId({ system_a: system_a_eff, code_a, system_b: system_b_eff, code_b })
+
+      let existing = null
+      try { existing = await prisma.masterRecord.findUnique({ where: { pairId } }) } catch { existing = await prisma.masterRecord.findFirst({ where: { pairId } }) }
+
+      let relCode, relType, rationalText, usedModel, usage
 
       if (!existing) {
-        const { a: conceptAText, b: conceptBText } = pickConceptText(row);
-        const events_ab = pickEventsAb(row);
-        const events_ab_ae = pickEventsAe(row);
-        const cls = await classifyRelationship({ conceptAText, conceptBText, events_ab, events_ab_ae });
-        ({ relCode, relType, rationalText, usedModel, usage } = cls);
+        const events_ab = pickEventsAb(row)
+        const events_ab_ae = pickEventsAe(row)
+        const cls = await classifyRelationship({ conceptAText: concept_a_name, conceptBText: concept_b_name, events_ab, events_ab_ae })
+        ;({ relCode, relType, rationalText, usedModel, usage } = cls)
 
-        await prisma.masterRecord.create({
-          data: {
-            pairId,
-            concept_a: row.concept_a ?? String(code_a),
-            code_a,
-            concept_b: row.concept_b ?? String(code_b),
-            code_b,
-            system_a,
-            system_b,
-            type_a: typeof type_a === 'string' ? type_a : null,
-            type_b: typeof type_b === 'string' ? type_b : null,
-            relationshipType: relType,
-            relationshipCode: Number(relCode),
-            rational: rationalText,
-            llm_name: 'OpenAI Chat Completions',
-            llm_version: usedModel || PRIMARY_MODEL,
-            llm_date: new Date(),
-            cooc_event_count: numOrZero(row.cooc_event_count),
-            source_count: 1,
-          },
-        });
+        // Base create data (authoritative from OMOP for identity fields)
+        const baseCreate = {
+          pairId,
+          concept_a: concept_a_name,
+          code_a,
+          concept_b: concept_b_name,
+          code_b,
+          system_a: system_a_eff,
+          system_b: system_b_eff,
+          type_a: typeof type_a_eff === 'string' ? type_a_eff : null,
+          type_b: typeof type_b_eff === 'string' ? type_b_eff : null,
+          relationshipType: relType,
+          relationshipCode: Number(relCode),
+          rational: rationalText,
+          llm_name: 'OpenAI Chat Completions',
+          llm_version: usedModel || PRIMARY_MODEL,
+          llm_date: new Date(),
+          source_count: 1
+        }
 
-        // Queue LLM cache line
+        // Copy mapped fields (guard identity/LLM fields to avoid clobbering OMOP-derived fields)
+        const mappedCreate = fieldMap.length ? buildCreateDataFromRow(row, fieldMap) : {}
+        const guarded = { ...mappedCreate }
+        delete guarded.pairId
+        delete guarded.relationshipType
+        delete guarded.relationshipCode
+        delete guarded.rational
+        delete guarded.llm_name
+        delete guarded.llm_version
+        delete guarded.llm_date
+        delete guarded.source_count
+        delete guarded.concept_a
+        delete guarded.concept_b
+        delete guarded.system_a
+        delete guarded.system_b
+        delete guarded.type_a
+        delete guarded.type_b
+        delete guarded.code_a
+        delete guarded.code_b
+
+        await prisma.masterRecord.create({ data: { ...baseCreate, ...guarded } })
+
+        // LLM cache line
         llmCacheBatch.push({
           timestamp: new Date().toISOString(),
           jobId,
@@ -255,104 +422,124 @@ export default async (req) => {
           userId: job.userId,
           rowIndex: String(offset),
           pairId,
-          system_a,
+          system_a: system_a_eff,
           code_a,
-          system_b,
+          system_b: system_b_eff,
           code_b,
-          concept_a_t: String(row.concept_a_t ?? row.concept_a ?? ''),
-          concept_b_t: String(row.concept_b_t ?? row.concept_b ?? ''),
+          concept_a_t: concept_a_name,
+          concept_b_t: concept_b_name,
           model: usedModel || PRIMARY_MODEL,
           relationship_code: String(relCode),
           relationship_type: relType,
           prompt_tokens: String(usage?.prompt_tokens ?? ''),
           completion_tokens: String(usage?.completion_tokens ?? ''),
-          total_tokens: String(usage?.total_tokens ?? ''),
-        });
+          total_tokens: String(usage?.total_tokens ?? '')
+        })
       } else {
-        relCode = Number(existing.relationshipCode ?? 11) || 11;
-        relType = String(existing.relationshipType ?? RELATIONSHIP_TYPES[11]);
-        rationalText = String(existing.rational ?? '');
-        usedModel = existing.llm_version || PRIMARY_MODEL;
+        // Preserve previous classification fields
+        relCode = Number(existing.relationshipCode ?? 11) || 11
+        relType = String(existing.relationshipType ?? RELATIONSHIP_TYPES[11])
+        rationalText = String(existing.rational ?? '')
+        usedModel = existing.llm_version || PRIMARY_MODEL
+
+        // Mapping-driven updates (adds counts; skip stats; increments source_count)
+        let mappedUpdate = fieldMap.length ? buildUpdateDataFromRow(existing, row, fieldMap) : {
+          cooc_event_count: numOrZero(existing?.cooc_event_count) + numOrZero(row.cooc_event_count),
+          source_count: numOrZero(existing?.source_count) + 1
+        }
+
+        // Refresh concept/system/type fields from OMOP (authoritative)
+        mappedUpdate = {
+          ...mappedUpdate,
+          concept_a: concept_a_name || existing.concept_a,
+          concept_b: concept_b_name || existing.concept_b,
+          system_a: system_a_eff || existing.system_a,
+          system_b: system_b_eff || existing.system_b,
+          ...(typeof type_a_eff === 'string' ? { type_a: type_a_eff } : {}),
+          ...(typeof type_b_eff === 'string' ? { type_b: type_b_eff } : {}),
+          updatedAt: new Date()
+        }
 
         await prisma.masterRecord.update({
           where: existing?.id ? { id: existing.id } : { pairId },
-          data: {
-            cooc_event_count: numOrZero(existing?.cooc_event_count) + numOrZero(row.cooc_event_count),
-            source_count: numOrZero(existing?.source_count) + 1,
-            updatedAt: new Date(),
-          },
-        });
+          data: mappedUpdate
+        })
       }
 
       const enriched = {
         ...row,
-        type_a: typeof type_a === 'string' ? type_a : '',
-        type_b: typeof type_b === 'string' ? type_b : '',
+        code_a,
+        code_b,
+        system_a: system_a_eff,
+        system_b: system_b_eff,
+        concept_a: concept_a_name,
+        concept_b: concept_b_name,
+        type_a: typeof type_a_eff === 'string' ? type_a_eff : '',
+        type_b: typeof type_b_eff === 'string' ? type_b_eff : '',
         relationship_type: relType,
         relationship_code: String(relCode),
-        rational: rationalText,
-      };
+        rational: rationalText
+      }
 
       if (!mainHeader) {
-        const prime = ensureHeader(mainCsvText, Object.keys(enriched));
-        mainHeader = prime.headers; mainCsvText = prime.csvText;
+        const prime = ensureHeader(mainCsvText, Object.keys(enriched))
+        mainHeader = prime.headers; mainCsvText = prime.csvText
       }
-      mainCsvText += rowToCsvLine(enriched, mainHeader) + '\n';
+      mainCsvText += rowToCsvLine(enriched, mainHeader) + '\n'
 
-      processedThisRun += 1;
-      const now = Date.now();
-      const timeUp = now - start > MAX_RUN_MS - 15_000;
-      const needFlush = processedThisRun % FLUSH_EVERY_ROWS === 0 || now - lastFlush > FLUSH_EVERY_MS || timeUp;
+      processedThisRun += 1
+      const now = Date.now()
+      const timeUp = now - start > MAX_RUN_MS - 15_000
+      const needFlush = processedThisRun % FLUSH_EVERY_ROWS === 0 || now - lastFlush > FLUSH_EVERY_MS || timeUp
 
       if (needFlush) {
-        await outputsStore.set(outputBlobKey, mainCsvText, { contentType: 'text/csv' });
+        await outputsStore.set(outputBlobKey, mainCsvText, { contentType: 'text/csv' })
         if (llmCacheBatch.length > 0) {
-          if (llmCacheText == null) llmCacheText = (await cacheStore.get(LLM_CACHE_BLOB_KEY, { type: 'text' })) || '';
-          const prime = ensureHeader(llmCacheText, ['timestamp','jobId','uploadId','userId','rowIndex','pairId','system_a','code_a','system_b','code_b','concept_a_t','concept_b_t','model','relationship_code','relationship_type','prompt_tokens','completion_tokens','total_tokens']);
-          const headers = prime.headers; llmCacheText = prime.csvText;
-          for (const cacheRow of llmCacheBatch) llmCacheText += rowToCsvLine(cacheRow, headers) + '\n';
-          await cacheStore.set(LLM_CACHE_BLOB_KEY, llmCacheText, { contentType: 'text/csv' });
-          llmCacheBatch.length = 0;
+          if (llmCacheText == null) llmCacheText = (await cacheStore.get(LLM_CACHE_BLOB_KEY, { type: 'text' })) || ''
+          const prime = ensureHeader(llmCacheText, llmCacheHeaders)
+          const headers = prime.headers; llmCacheText = prime.csvText
+          for (const cacheRow of llmCacheBatch) llmCacheText += rowToCsvLine(cacheRow, headers) + '\n'
+          await cacheStore.set(LLM_CACHE_BLOB_KEY, llmCacheText, { contentType: 'text/csv' })
+          llmCacheBatch.length = 0
         }
-        await prisma.job.update({ where: { id: jobId }, data: { rowsProcessed: offset + 1, outputBlobKey } });
-        lastFlush = now;
+        await prisma.job.update({ where: { id: jobId }, data: { rowsProcessed: offset + 1, outputBlobKey } })
+        lastFlush = now
       }
 
-      if (timeUp) break;
+      if (timeUp) break
     }
 
-    // Final flush of this run
-    await getStore('outputs').set(outputBlobKey, mainCsvText, { contentType: 'text/csv' });
+    await getStore('outputs').set(outputBlobKey, mainCsvText, { contentType: 'text/csv' })
     if (llmCacheBatch.length > 0) {
-      const cacheStore2 = getStore(LLM_CACHE_STORE);
-      let cacheText2 = (await cacheStore2.get(LLM_CACHE_BLOB_KEY, { type: 'text' })) || '';
-      const prime = ensureHeader(cacheText2, ['timestamp','jobId','uploadId','userId','rowIndex','pairId','system_a','code_a','system_b','code_b','concept_a_t','concept_b_t','model','relationship_code','relationship_type','prompt_tokens','completion_tokens','total_tokens']);
-      const headers = prime.headers; cacheText2 = prime.csvText;
-      for (const cacheRow of llmCacheBatch) cacheText2 += rowToCsvLine(cacheRow, headers) + '\n';
-      await cacheStore2.set(LLM_CACHE_BLOB_KEY, cacheText2, { contentType: 'text/csv' });
+      const cacheStore2 = getStore(LLM_CACHE_STORE)
+      let cacheText2 = (await cacheStore2.get(LLM_CACHE_BLOB_KEY, { type: 'text' })) || ''
+      const prime = ensureHeader(cacheText2, llmCacheHeaders)
+      const headers = prime.headers; cacheText2 = prime.csvText
+      for (const cacheRow of llmCacheBatch) cacheText2 += rowToCsvLine(cacheRow, headers) + '\n'
+      await cacheStore2.set(LLM_CACHE_BLOB_KEY, cacheText2, { contentType: 'text/csv' })
     }
-    await prisma.job.update({ where: { id: jobId }, data: { rowsProcessed: offset, outputBlobKey } });
+    await prisma.job.update({ where: { id: jobId }, data: { rowsProcessed: offset, outputBlobKey } })
 
     if (offset >= rowsTotal) {
-      await prisma.job.update({ where: { id: jobId }, data: { status: 'completed', finishedAt: new Date() } });
-      return new Response(JSON.stringify({ ok: true, status: 'completed' }), { status: 202, headers: { 'content-type': 'application/json' } });
+      await prisma.job.update({ where: { id: jobId }, data: { status: 'completed', finishedAt: new Date() } })
+      return new Response(JSON.stringify({ ok: true, status: 'completed' }), { status: 202, headers: { 'content-type': 'application/json' } })
     }
 
-    // Not done — re‑invoke ourselves to continue
+    // re‑invoke to continue
     try {
-      const host = req.headers.get('x-forwarded-host');
-      const proto = req.headers.get('x-forwarded-proto') || 'https';
-      const origin = process.env.URL || (host ? `${proto}://${host}` : '');
+      const host = req.headers.get('x-forwarded-host')
+      const proto = req.headers.get('x-forwarded-proto') || 'https'
+      const origin = process.env.URL || (host ? `${proto}://${host}` : '')
       if (origin) {
-        await fetch(`${origin}/.netlify/functions/process-upload-background`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jobId }) });
+        await fetch(`${origin}/.netlify/functions/process-upload-background`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jobId }) })
       }
     } catch (e) {
-      console.warn('[self-chain] failed to re-invoke background function:', e?.message || e);
+      console.warn('[self-chain] failed to re-invoke background function:', e?.message || e)
     }
 
-    return new Response(JSON.stringify({ ok: true, status: 'running' }), { status: 202, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify({ ok: true, status: 'running' }), { status: 202, headers: { 'content-type': 'application/json' } })
   } catch (err) {
-    console.error('[process-upload-background] ERROR', err);
-    return new Response(JSON.stringify({ error: String(err?.message ?? err) }), { status: 500, headers: { 'content-type': 'application/json' } });
+    console.error('[process-upload-background] ERROR', err)
+    return new Response(JSON.stringify({ error: String(err?.message ?? err) }), { status: 500, headers: { 'content-type': 'application/json' } })
   }
 }
