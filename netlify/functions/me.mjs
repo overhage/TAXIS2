@@ -77,15 +77,24 @@ user = await userFromFallbackCookie(request)
 }
 
 
+const admins = (process.env.ADMIN_EMAILS || "")
+  .split(",")
+  .map(s => s.trim().toLowerCase())
+  .filter(Boolean)
+
+const isAdmin = user
+  ? Boolean(user.isAdmin || user.role === 'admin' || admins.includes((user.email || '').toLowerCase()))
+  : false
+
 const payload = user
-? {
-id: user.id,
-email: user.email,
-name: user.name,
-role: user.role,
-isAdmin: Boolean(user.isAdmin || user.role === 'admin'),
-}
-: {}
+  ? {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      isAdmin,
+    }
+  : {}
 
 
 return new Response(JSON.stringify(payload), {

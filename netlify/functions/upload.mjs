@@ -22,10 +22,44 @@ function getExt(filename, mime) {
   return '.csv';
 }
 
+// --- ADDED: lightweight auth fallback, keeps the rest of the file unchanged ---
+function readSessionCookie(req) {
+  const cookieHeader = req.headers.get('cookie') || ''
+  for (const part of cookieHeader.split(';')) {
+    const seg = part.trim()
+    const i = seg.indexOf('=')
+    if (i === -1) continue
+    if (seg.slice(0, i) === 'session') return decodeURIComponent(seg.slice(i + 1))
+  }
+  return null
+}
+
+async function requireUser(req) {
+  // Try existing helper first (if present)
+  if (typeof getUserFromRequest === 'function') {
+    const eventLike = { headers: { cookie: req.headers.get('cookie') || '' } }
+    try {
+      const u = await getUserFromRequest(eventLike)
+      if (u) return u
+    } catch (_) {}
+  }
+  // Fallback: parse our `${userId}.${timestamp}` cookie and load from DB
+  const token = readSessionCookie(req)
+  if (!token) return null
+  const dot = token.indexOf('.')
+  const userId = dot === -1 ? token : token.slice(0, dot)
+  if (!userId) return null
+  try {
+    return await prisma.user.findUnique({ where: { id: userId } })
+  } catch {
+    return null
+  }
+}
+// --- END ADDED ---
+
 export default async (req) => {
   try {
-    const eventLike = { headers: { cookie: req.headers.get('cookie') || '' } };
-    const user = await getUserFromRequest(eventLike);
+    const user = await requireUser(req);
     if (!user) {
       return new Response(JSON.stringify({ error: 'Not authenticated' }), { status: 401, headers: { 'content-type': 'application/json' } });
     }
