@@ -23,6 +23,18 @@
   external_node_modules = ["@prisma/client","prisma"]
   included_files = ["node_modules/.prisma/client/**"]  # engines only
 
+[functions."auth"]
+  external_node_modules = ["@prisma/client","prisma"]
+  included_files = ["node_modules/.prisma/client/**"]
+
+[functions."logout"]
+  external_node_modules = ["@prisma/client","prisma"]
+  included_files = ["node_modules/.prisma/client/**"]
+
+[functions."admin-download-master"]
+  external_node_modules = ["@prisma/client","prisma"]
+  included_files = ["node_modules/.prisma/client/**"]
+
 [functions."admin-master-record"]
   external_node_modules = ["@prisma/client","prisma"]
   included_files = ["node_modules/.prisma/client/**"]
@@ -36,10 +48,6 @@
   included_files = ["node_modules/.prisma/client/**"]
 
 [functions."download"]
-  external_node_modules = ["@prisma/client","prisma"]
-  included_files = ["node_modules/.prisma/client/**"]
-
-[functions."admin-download-master"]
   external_node_modules = ["@prisma/client","prisma"]
   included_files = ["node_modules/.prisma/client/**"]
 
@@ -57,6 +65,3 @@
   from = "/*"
   to   = "/index.html"
   status = 200
-
-
-
