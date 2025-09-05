@@ -1,90 +1,99 @@
 // netlify/functions/admin-download-master.mjs — Functions v2 (ESM)
-// Converts the previous v1 (zisi/CommonJS) handler to v2 using the Web Fetch API.
-// Streams a CSV export of MasterRecord rows. Requires Prisma (scoped in netlify.toml).
+// Fixes runtime module error by removing local './utils/prisma' dependency.
+// Uses PrismaClient directly and streams a CSV of MasterRecord rows.
 
+
+import { PrismaClient } from '@prisma/client'
 import { createRequire } from 'module'
 const require = createRequire(import.meta.url)
 
-// Interop with existing CommonJS utils without rewriting them right now
-const prisma = require('./utils/prisma')
-const { getUserFromRequest } = require('./utils/auth')
+
+// Reuse Prisma between invocations
+const prisma = globalThis.__PRISMA__ ?? new PrismaClient()
+if (!globalThis.__PRISMA__) globalThis.__PRISMA__ = prisma
+
+
+let getUserFromRequest
+try { ({ getUserFromRequest } = require('./utils/auth')) } catch (_) { getUserFromRequest = null }
+
 
 function toEventShim(request) {
-  const url = new URL(request.url)
-  return {
-    httpMethod: request.method,
-    path: url.pathname,
-    headers: Object.fromEntries(request.headers.entries()),
-    queryStringParameters: Object.fromEntries(url.searchParams.entries()),
-    body: null,
-    isBase64Encoded: false,
-  }
+const url = new URL(request.url)
+return {
+httpMethod: request.method,
+path: url.pathname,
+headers: Object.fromEntries(request.headers.entries()),
+queryStringParameters: Object.fromEntries(url.searchParams.entries()),
+body: null,
+isBase64Encoded: false,
+}
 }
 
-function csvEscape(value) {
-  if (value === null || value === undefined) return ''
-  const s = String(value).replace(/"/g, '""')
-  return '"' + s + '"'
+
+function csvEscape(v) {
+if (v === null || v === undefined) return ''
+const s = String(v).replace(/"/g, '""')
+return '"' + s + '"'
 }
+
 
 export default async function handler(request) {
-  // AuthZ: only admins can download
-  const event = toEventShim(request)
-  const user = await getUserFromRequest(event)
-  if (!user || !(user.isAdmin || user.role === 'admin')) {
-    return new Response(JSON.stringify({ error: 'Forbidden' }), {
-      status: 403,
-      headers: { 'content-type': 'application/json' },
-    })
-  }
+// Require admin
+if (!getUserFromRequest) {
+return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { 'content-type': 'application/json' } })
+}
+const user = await getUserFromRequest(toEventShim(request))
+if (!user || !(user.isAdmin || user.role === 'admin')) {
+return new Response(JSON.stringify({ error: 'Forbidden' }), { status: 403, headers: { 'content-type': 'application/json' } })
+}
 
-  // Stream CSV so we don't hold the whole file in memory
-  const stream = new ReadableStream({
-    async start(controller) {
-      const encoder = new TextEncoder()
-      const write = (chunk) => controller.enqueue(encoder.encode(chunk))
 
-      // Page through results to avoid huge single queries
-      const TAKE = 2000
-      let skip = 0
-      let wroteHeader = false
+const stream = new ReadableStream({
+async start(controller) {
+const enc = new TextEncoder()
+const write = (s) => controller.enqueue(enc.encode(s))
 
-      try {
-        for (;;) {
-          const rows = await prisma.masterRecord.findMany({ take: TAKE, skip })
-          if (!rows.length) break
 
-          // Determine columns once from the first page
-          if (!wroteHeader) {
-            const headers = Object.keys(rows[0])
-            write(headers.join(',') + '\n')
-            controller.headers = headers // stash for later rows
-            wroteHeader = true
-          }
+const TAKE = 2000
+let skip = 0
+let cols = null
 
-          const headers = controller.headers
-          for (const row of rows) {
-            const line = headers.map((h) => csvEscape(row[h])).join(',') + '\n'
-            write(line)
-          }
 
-          skip += rows.length
-          if (rows.length < TAKE) break // last page
-        }
+try {
+for (;;) {
+const rows = await prisma.masterRecord.findMany({ take: TAKE, skip })
+if (rows.length === 0) break
 
-        controller.close()
-      } catch (err) {
-        controller.error(err)
-      }
-    },
-  })
 
-  return new Response(stream, {
-    status: 200,
-    headers: {
-      'content-type': 'text/csv; charset=utf-8',
-      'content-disposition': 'attachment; filename="MasterRecord.csv"',
-      'cache-control': 'no-store',
-    },
-  })
+if (!cols) {
+cols = Object.keys(rows[0])
+write(cols.join(',') + '\n')
+}
+
+
+for (const row of rows) {
+const line = cols.map((h) => csvEscape(row[h])).join(',') + '\n'
+write(line)
+}
+
+
+skip += rows.length
+if (rows.length < TAKE) break
+}
+controller.close()
+} catch (err) {
+controller.error(err)
+}
+},
+})
+
+
+return new Response(stream, {
+status: 200,
+headers: {
+'content-type': 'text/csv; charset=utf-8',
+'content-disposition': 'attachment; filename="MasterRecord.csv"',
+'cache-control': 'no-store',
+},
+})
 }
