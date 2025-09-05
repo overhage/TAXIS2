@@ -454,7 +454,6 @@ export default async (req) => {
         delete guarded.code_b
 
         const createData = coerceTypesInPlace({ ...baseCreate, ...guarded })
-         wait prisma.masterRecord.create({ data: createData })
 
 
         console.log('[dbg] mappedCreate keys', Object.keys(mappedCreate))
