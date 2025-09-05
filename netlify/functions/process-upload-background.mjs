@@ -299,6 +299,16 @@ async function classifyRelationship ({ conceptAText, conceptBText, events_ab, ev
   return { relCode: 11, relType: RELATIONSHIP_TYPES[11], rationalText: lastErrText ? `LLM error: ${lastErrText.slice(0, 200)}` : 'LLM unavailable', usedModel: MODEL_FALLBACKS[0], usage: {} }
 }
 
+// (re)define CSV line helper (may have been dropped during edits)
+function rowToCsvLine (row, headers) {
+  const esc = (v) => {
+    const s = String(v ?? '')
+    // Quote if the field contains a quote, comma, or newline (CR or LF)
+    return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s
+  }
+  return headers.map((h) => esc(row[h])).join(',')
+}
+
 function ensureHeader (existingCsvText, headersFromSample) {
   if (existingCsvText && existingCsvText.length > 0) {
     const firstNl = existingCsvText.indexOf('\n')
