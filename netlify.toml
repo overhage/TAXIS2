@@ -51,6 +51,10 @@
   external_node_modules = ["@prisma/client","prisma"]
   included_files = ["node_modules/.prisma/client/**"]
 
+  [functions."me"]
+  external_node_modules = ["@prisma/client","prisma"]
+  included_files = ["node_modules/.prisma/client/**"]
+
 [[redirects]]
   from = "/api/*"
   to   = "/.netlify/functions/:splat"
