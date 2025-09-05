@@ -162,13 +162,13 @@ function AdminLLMCacheSection() {
   const [stats, setStats] = useState<{ calls: number; sumPrompt: number; sumCompletion: number; sumTotal: number; avgPerCall: number } | null>(null);
   const [llmApiBase, setLlmApiBase] = useState<string>('/.netlify/functions/admin-llm-cache');
   
-// Candidate endpoints: Netlify Function (canonical), pretty redirect (optional), then any /api proxies
-const buildLlmUrls = (qs: URLSearchParams) => [
-  `/.netlify/functions/admin-llm-cache?${qs}`, // canonical on Netlify
-  `/admin-llm-cache?${qs.toString()}`,         // pretty path (works if redirect/config is present)
-  `/api/admin-llm-cache?${qs}`,                // optional Next API proxy (not currently present)
-  `/api/admin-llmcache?${qs}`,                 // legacy fallback (not present)
-];
+  // Candidate endpoints: Netlify Function (canonical), pretty redirect (optional), then any /api proxies
+  const buildLlmUrls = (qs: URLSearchParams) => [
+    `/.netlify/functions/admin-llm-cache?${qs}`, // canonical on Netlify
+    `/admin-llm-cache?${qs.toString()}`,         // pretty path (works if redirect/config is present)
+    `/api/admin-llm-cache?${qs}`,                // optional Next API proxy (not currently present)
+    `/api/admin-llmcache?${qs}`,                 // legacy fallback (not present)
+  ];
 
   const fetchTail = async () => {
     setErr('');
@@ -208,12 +208,12 @@ const buildLlmUrls = (qs: URLSearchParams) => [
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
- const csvHref = useMemo(() => {
- const qs = new URLSearchParams({ op: 'download' });
- if (jobId.trim()) qs.set('jobId', jobId.trim());
- const base = llmApiBase || '/.netlify/functions/admin-llm-cache';
- return `${base}?${qs.toString()}`;
- }, [jobId, llmApiBase]);
+  const csvHref = useMemo(() => {
+    const qs = new URLSearchParams({ op: 'download' });
+    if (jobId.trim()) qs.set('jobId', jobId.trim());
+    const base = llmApiBase || '/.netlify/functions/admin-llm-cache';
+    return `${base}?${qs.toString()}`;
+  }, [jobId, llmApiBase]);
 
   return (
     <section className="border rounded-2xl p-6 bg-white shadow-sm">
@@ -356,50 +356,116 @@ const AdminPage: React.FC = () => {
   };
 
   return (
-<div>
-<Header title="Administrator Dashboard" />
-<main className="px-6 md:pl-12 md:pr-8 py-6 space-y-6 max-w-7xl mx-auto">
-{user && (
-<div className="text-sm mb-2">
-Signed in as <strong>{user?.name || user?.email || 'User'}</strong>
-{user?.email ? ` (${user.email})` : ''}
-</div>
-)}
+    <div>
+      <Header title="Administrator Dashboard" />
+      <main className="px-6 md:pl-12 md:pr-8 py-6 space-y-6 max-w-7xl mx-auto">
+        {user && (
+          <div className="text-sm mb-2">
+            Signed in as <strong>{user?.name || user?.email || 'User'}</strong>
+            {user?.email ? ` (${user.email})` : ''}
+          </div>
+        )}
 
+        {error && <div className="text-red-700">{error}</div>}
 
-{error && <div className="text-red-700">{error}</div>}
+        {forbidden ? (
+          <div className="p-3 rounded-md border border-red-300 bg-red-50 text-red-800">
+            You do not have admin access.
+            {who ? (
+              <>
+                <span> </span>Detected as <strong>{who}</strong>. Ensure your email is in <code>ADMIN_EMAILS</code> and your session includes it.
+              </>
+            ) : null}
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 gap-6">
+            <AdminMasterRecordSection />
+            <AdminLLMCacheSection />
 
+            {/* Jobs list — now wrapped in a card */}
+            <section className="border rounded-2xl p-6 bg-white shadow-sm">
+              <div className="mb-3 flex items-center justify-between">
+                <h2 className="text-lg font-medium">All Jobs</h2>
+                <div className="flex items-center gap-2">
+                  <button onClick={fetchJobs} className="inline-flex items-center rounded-md px-3 py-2 border border-neutral-300 hover:bg-neutral-50 text-sm">Refresh</button>
+                </div>
+              </div>
 
-{forbidden ? (
-<div className="p-3 rounded-md border border-red-300 bg-red-50 text-red-800">
-You do not have admin access.
-{who ? (
-<>
-<span> </span>Detected as <strong>{who}</strong>. Ensure your email is in <code>ADMIN_EMAILS</code> and your session includes it.
-</>
-) : null}
-</div>
-) : (
-<div className="grid grid-cols-1 gap-6">
-<AdminMasterRecordSection />
-<AdminLLMCacheSection />
+              {loading ? (
+                <div className="text-sm">Loading…</div>
+              ) : jobs.length === 0 ? (
+                <div className="text-sm text-neutral-600">No jobs found.</div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="min-w-full text-sm">
+                    <thead>
+                      <tr className="text-left border-b">
+                        <th className="py-2 pr-4">ID</th>
+                        <th className="py-2 pr-4">File</th>
+                        <th className="py-2 pr-4">User</th>
+                        <th className="py-2 pr-4">Rows</th>
+                        <th className="py-2 pr-4">Created</th>
+                        <th className="py-2 pr-4">Status</th>
+                        <th className="py-2 pr-4">Output</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {jobs.map((j) => (
+                        <tr key={j.id} className="border-b align-top">
+                          <td className="py-2 pr-4">{j.id}</td>
+                          <td className="py-2 pr-4">{j.fileName}</td>
+                          <td className="py-2 pr-4">{j.userEmail || '—'}</td>
+                          <td className="py-2 pr-4">{j.rowCount ?? '—'}</td>
+                          <td className="py-2 pr-4">{fmtDate(j.createdAt)}</td>
+                          <td className="py-2 pr-4">{j.status}</td>
+                          <td className="py-2 pr-4">{j.outputUrl ? (<a href={j.outputUrl} className="text-blue-600 underline">Download</a>) : '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
 
+            {/* Delete jobs — now wrapped in a card */}
+            <section className="border rounded-2xl p-6 bg-white shadow-sm">
+              <div className="mb-3 flex items-center justify-between">
+                <h2 className="text-lg font-medium">Delete Jobs</h2>
+              </div>
+              <p className="text-sm text-neutral-600 mb-3">Choose filters. A preview count will be shown before deletion.</p>
 
-{/* Jobs list — now wrapped in a card */}
-<section className="border rounded-2xl p-6 bg-white shadow-sm">
-<div className="mb-3 flex items-center justify-between">
-<h2 className="text-lg font-medium">All Jobs</h2>
-<div className="flex items-center gap-2">
-<button onClick={fetchJobs} className="inline-flex items-center rounded-md px-3 py-2 border border-neutral-300 hover:bg-neutral-50 text-sm">Refresh</button>
-</div>
-</div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 max-w-2xl">
+                <input type="date" value={deleteFilters.date} onChange={(e) => setDeleteFilters({ ...deleteFilters, date: e.target.value })} className="border rounded-md px-3 py-2" />
+                <select value={deleteFilters.status} onChange={(e) => setDeleteFilters({ ...deleteFilters, status: e.target.value })} className="border rounded-md px-3 py-2">
+                  <option value="">--Status--</option>
+                  <option value="queued">Queued</option>
+                  <option value="running">Running</option>
+                  <option value="completed">Completed</option>
+                  <option value="failed">Failed</option>
+                </select>
+                <input type="text" placeholder="User email" value={deleteFilters.user} onChange={(e) => setDeleteFilters({ ...deleteFilters, user: e.target.value })} className="border rounded-md px-3 py-2" />
+              </div>
 
+              <div className="mt-3 flex items-center gap-2">
+                <button onClick={async () => { await previewDelete(); }} className="px-3 py-2 rounded-md bg-black text-white w-fit">Preview</button>
+                {previewCount != null && <span className="text-sm text-neutral-600">Matches: {previewCount}</span>}
+              </div>
 
-{loading ? (
-<div className="text-sm">Loading…</div>
-) : jobs.length === 0 ? (
-<div className="text-sm text-neutral-600">No jobs found.</div>
-) : (
-<div className="overflow-x-auto">
-<table className="min-w-full text-sm">
+              {confirming && (
+                <div className="mt-3 p-3 border rounded-md bg-yellow-50 text-yellow-900">
+                  Delete <strong>{previewCount}</strong> job(s)? This cannot be undone.
+                  <div className="mt-2 flex gap-2">
+                    <button onClick={async () => { await doDelete(); }} className="px-3 py-2 rounded-md bg-red-700 text-white">Confirm delete</button>
+                    <button onClick={() => { setConfirming(false); setPreviewCount(null); }} className="px-3 py-2 rounded-md border">Cancel</button>
+                  </div>
+                </div>
+              )}
+            </section>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+};
+
 export default AdminPage;
