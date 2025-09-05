@@ -453,12 +453,18 @@ export default async (req) => {
         delete guarded.code_a
         delete guarded.code_b
 
+        const createData = coerceTypesInPlace({ ...baseCreate, ...guarded })
+         wait prisma.masterRecord.create({ data: createData })
+
+
         console.log('[dbg] mappedCreate keys', Object.keys(mappedCreate))
         console.log('[dbg] guarded cooc_obs typeof=', typeof guarded.cooc_obs, 'value=', guarded.cooc_obs)
         console.log('[dbg] createData cooc_obs typeof=', typeof createData.cooc_obs, 'value=', createData.cooc_obs)
 
+        await prisma.masterRecord.create({ data: createData })
 
-        await prisma.masterRecord.create({ data: coerceTypesInPlace({ ...baseCreate, ...guarded }) })
+        // previous verison, can revert and delete the const createData once debugged
+        // await prisma.masterRecord.create({ data: coerceTypesInPlace({ ...baseCreate, ...guarded }) })
 
         // LLM cache line
         llmCacheBatch.push({
