@@ -311,7 +311,6 @@ function ensureHeader (existingCsvText, headersFromSample) {
   return { headers: uniq, csvText: headerLine, headerExists: false }
 }
 
-$1
 // Coerce numeric fields (case-insensitive) right before DB writes
 function coerceTypesInPlace(obj) {
   for (const key of Object.keys(obj || {})) {
