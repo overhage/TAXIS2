@@ -50,18 +50,18 @@ const normalizeOptionalType = (v) => {
   if (v == null) return null
   const s = String(v).trim().toLowerCase()
   if (!s) return null
-  return ALLOWED_TYPES.has(s) ? s : 'other'
+  return ALLOWED_TYPES.has(s) ? s: 'other'
 }
 const numOrZero = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0 }
 const makePairId = ({ system_a, code_a, system_b, code_b }) => [system_a, code_a, system_b, code_b].map(x => String(x ?? '').trim().toUpperCase()).join('|')
 
-// Fields that are Ints in Prisma
+// Fields that are Ints in Prisma (all lower-case for matching)
 const INT_FIELDS = new Set([
   'cooc_obs','cooc_event_count','a_before_b','same_day','b_before_a',
-  'nA','nB','total_persons','source_count','relationshipCode'
+  'na', 'nb', 'total_persons', 'source_count', 'relationshipcode'
 ])
 
-// Fields that are numeric/decimal in Prisma
+// Fields that are numeric/decimal in Prisma (all lower-case)
 const FLOAT_FIELDS = new Set([
   'lift','lift_lower_95','lift_upper_95','z_score',
   'ab_h','a_only_h','b_only_h','neither_h',
@@ -166,15 +166,17 @@ function buildCreateDataFromRow (row, fieldMap) {
     if (src === undefined) continue
 
     const field = m.prismaField
+    const fieldLc = String(field || '').toLowerCase()
+
     // Prefer category hints first…
     if (isCountCategory(m.category)) {
       data[field] = numOrZero(src)               // Int
     } else if (isStatCategory(m.category)) {
       data[field] = toFloatOrNull(src)           // Float/Decimal
     } else {
-      // …then fall back to explicit field lists to be extra safe
-      if (INT_FIELDS.has(field)) data[field] = numOrZero(src)
-      else if (FLOAT_FIELDS.has(field)) data[field] = toFloatOrNull(src)
+      // …then fall back to explicit field lists (case-insensitive)
+      if (INT_FIELDS.has(fieldLc)) data[field] = numOrZero(src)
+      else if (FLOAT_FIELDS.has(fieldLc)) data[field] = toFloatOrNull(src)
       else data[field] = src ?? null
     }
   }
@@ -188,12 +190,18 @@ function buildUpdateDataFromRow (existing, row, fieldMap) {
     const src = row[m.uploadCol]
     if (src === undefined) continue
     const field = m.prismaField
+    const fieldLc = String(field || '').toLowerCase()
+
     if (isCountCategory(m.category)) {
       data[field] = numOrZero(existing?.[field]) + numOrZero(src)
     } else if (isStatCategory(m.category)) {
       // skip statistical fields
       continue
+    } else if (INT_FIELDS.has(fieldLc)) {
+      // additive for counts even if category missing
+      data[field] = numOrZero(existing?.[field]) + numOrZero(src)
     } else {
+      // only backfill non-numeric fields when empty
       const cur = existing?.[field]
       const isEmpty = cur === null || cur === undefined || (typeof cur === 'string' && cur.trim() === '')
       if (isEmpty) data[field] = src
@@ -303,9 +311,18 @@ function ensureHeader (existingCsvText, headersFromSample) {
   return { headers: uniq, csvText: headerLine, headerExists: false }
 }
 
-function rowToCsvLine (row, headers) {
-  const esc = (v) => { const s = String(v ?? ''); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s }
-  return headers.map((h) => esc(row[h])).join(',')
+$1
+// Coerce numeric fields (case-insensitive) right before DB writes
+function coerceTypesInPlace(obj) {
+  for (const key of Object.keys(obj || {})) {
+    const lc = key.toLowerCase()
+    if (INT_FIELDS.has(lc)) {
+      obj[key] = numOrZero(obj[key])
+    } else if (FLOAT_FIELDS.has(lc)) {
+      obj[key] = toFloatOrNull(obj[key])
+    }
+  }
+  return obj
 }
 
 export default async (req) => {
@@ -437,7 +454,7 @@ export default async (req) => {
         delete guarded.code_a
         delete guarded.code_b
 
-        await prisma.masterRecord.create({ data: { ...baseCreate, ...guarded } })
+        await prisma.masterRecord.create({ data: coerceTypesInPlace({ ...baseCreate, ...guarded }) })
 
         // LLM cache line
         llmCacheBatch.push({
@@ -487,7 +504,7 @@ export default async (req) => {
 
         await prisma.masterRecord.update({
           where: existing?.id ? { id: existing.id } : { pairId },
-          data: mappedUpdate
+          data: coerceTypesInPlace(mappedUpdate)
         })
       }
 
