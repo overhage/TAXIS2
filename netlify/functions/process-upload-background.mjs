@@ -26,7 +26,7 @@ const FIELD_MAP_CANDIDATE_KEYS = [
   'MasterRecord Fields.csv',
   'masterrecord_fields.xlsx',
   'masterrecord_fields.csv',
-  'MasterRecordFields.xlsx',
+  'MasterRecordFields.xlsx',F
   'MasterRecordFields.csv'
 ]
 

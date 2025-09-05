@@ -10,12 +10,39 @@ NODE_VERSION = "20"
 [functions]
 node_bundler = "esbuild"
 directory = "netlify/functions"
-external_node_modules = ["@prisma/client", "prisma"]
-included_files = [
-  "node_modules/.prisma/**",
-  "node_modules/@prisma/client/**"
-]
 
+[functions]
+  node_bundler = "esbuild"
+
+# default: keep functions lean (no Prisma by default)
+[functions."*"]
+  external_node_modules = []
+  included_files = []
+
+# DB-backed functions ONLY:
+[functions."process-upload-background"]
+  external_node_modules = ["@prisma/client","prisma"]
+  included_files = ["node_modules/.prisma/client/**"]  # engines only
+
+[functions."admin-master-record"]
+  external_node_modules = ["@prisma/client","prisma"]
+  included_files = ["node_modules/.prisma/client/**"]
+
+[functions."admin-jobs"]
+  external_node_modules = ["@prisma/client","prisma"]
+  included_files = ["node_modules/.prisma/client/**"]
+
+[functions."jobs"]
+  external_node_modules = ["@prisma/client","prisma"]
+  included_files = ["node_modules/.prisma/client/**"]
+
+[functions."download"]
+  external_node_modules = ["@prisma/client","prisma"]
+  included_files = ["node_modules/.prisma/client/**"]
+
+[functions."admin-download-master"]
+  external_node_modules = ["@prisma/client","prisma"]
+  included_files = ["node_modules/.prisma/client/**"]
 
 [[redirects]]
 from = "/api/*"
