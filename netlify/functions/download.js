@@ -1,52 +1,56 @@
-// netlify/functions/download.mjs  (Functions v2, ESM)
-// Streams validated CSV from Netlify Blobs; Request/Response API.
+import { PrismaClient } from '@prisma/client'
+import { getStore } from '@netlify/blobs'
+import { requireAdmin, requireUser } from './_admin-gate.mjs'
 
-import { getStore } from '@netlify/blobs';
-import prismaCjs from './utils/prisma.js';
-import { PrismaClient } from '@prisma/client';
-import authUtilsCjs from './utils/auth.js';
-
-const prisma = globalThis.__prisma || new PrismaClient();
-// cache the client across invocations
+const prisma = globalThis.__prisma || new PrismaClient()
 // @ts-ignore
-globalThis.__prisma = prisma;
-const { getUserFromRequest } = authUtilsCjs; // named export from CJS module
+globalThis.__prisma = prisma
 
-export default async (req) => {
+export default async function handler(req) {
   try {
-    const url = new URL(req.url);
-    const jobId = url.searchParams.get('job');
-    if (!jobId) return new Response('Missing job id', { status: 400 });
+    if (req.method !== 'GET') {
+      return new Response('Method Not Allowed', { status: 405 })
+    }
 
-    // Reuse v1 auth util by passing only the cookie header
-    const eventLike = { headers: { cookie: req.headers.get('cookie') || '' } };
-    const user = await getUserFromRequest(eventLike);
-    if (!user) return new Response('Unauthorized', { status: 401 });
+    const url = new URL(req.url)
+    const jobId = url.searchParams.get('job')
+    if (!jobId) return new Response('Missing job', { status: 400 })
 
-    const job = await prisma.job.findUnique({ where: { id: jobId } });
-    if (!job) return new Response('Job not found', { status: 404 });
+    // Load job first (we need userId to decide access)
+    const job = await prisma.job.findUnique({
+      where: { id: jobId },
+      select: { id: true, userId: true, outputBlobKey: true }
+    })
+    if (!job) return new Response('Not found', { status: 404 })
 
-    const isOwner = job.userId === user.id;
-    const isAdmin = user.isAdmin;
-    if (!isOwner && !isAdmin) return new Response('Forbidden', { status: 403 });
+    // Allow if admin OR owner
+    const gate = await requireAdmin(req)
+    let user = null
+    if (!gate.allowed) {
+      user = await requireUser(req)
+      if (!user || user.id !== job.userId) {
+        return new Response('Unauthorized', { status: 401 })
+      }
+    }
 
-    if (!job.outputBlobKey) return new Response('No output available', { status: 404 });
+    if (!job.outputBlobKey) {
+      return new Response('Output not ready', { status: 404 })
+    }
 
-    const outputs = getStore('outputs');
-    const arrBuf = await outputs.get(job.outputBlobKey, { type: 'arrayBuffer' });
-    if (!arrBuf) return new Response('Output not found', { status: 404 });
+    const outputs = getStore('outputs')
+    const stream = await outputs.get(job.outputBlobKey, { type: 'stream' })
+    if (!stream) return new Response('Not found', { status: 404 })
 
-    const suggested = job.outputBlobKey.split('/').pop() || 'output.csv';
-
-    return new Response(Buffer.from(arrBuf), {
+    return new Response(stream, {
       status: 200,
       headers: {
-        'content-type': 'text/csv',
-        'content-disposition': `attachment; filename="${suggested}"`,
-      },
-    });
+        'content-type': 'text/csv; charset=utf-8',
+        'content-disposition': `attachment; filename="job-${job.id}.csv"`,
+        'cache-control': 'no-store'
+      }
+    })
   } catch (err) {
-    console.error('download_v2_error', err);
-    return new Response('Internal server error', { status: 500 });
+    console.error('[download] ERROR', err)
+    return new Response('Server error', { status: 500 })
   }
-};
+}

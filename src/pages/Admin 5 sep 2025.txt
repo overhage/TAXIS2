@@ -356,50 +356,104 @@ const AdminPage: React.FC = () => {
   };
 
   return (
-<div>
-<Header title="Administrator Dashboard" />
-<main className="px-6 md:pl-12 md:pr-8 py-6 space-y-6 max-w-7xl mx-auto">
-{user && (
-<div className="text-sm mb-2">
-Signed in as <strong>{user?.name || user?.email || 'User'}</strong>
-{user?.email ? ` (${user.email})` : ''}
-</div>
-)}
+    <div>
+      <Header title="Administrator Dashboard" />
+      <main className="p-4 space-y-6">
+        {user && (
+          <div className="text-sm mb-2">
+            Signed in as <strong>{user?.name || user?.email || 'User'}</strong>
+            {user?.email ? ` (${user.email})` : ''}
+          </div>
+        )}
 
+        {error && <div className="text-red-700">{error}</div>}
 
-{error && <div className="text-red-700">{error}</div>}
+        {forbidden ? (
+          <div className="p-3 rounded-md border border-red-300 bg-red-50 text-red-800">
+            You do not have admin access.
+            {who ? (
+              <>
+                <span> </span>Detected as <strong>{who}</strong>. Ensure your email is in <code>ADMIN_EMAILS</code> and your session includes it.
+              </>
+            ) : null}
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 gap-6">
+            <AdminMasterRecordSection />
 
+            {/* Jobs list */}
+            <section>
+              <h2 className="text-xl font-semibold mb-2">All Jobs</h2>
+              {loading ? (
+                <div>Loading…</div>
+              ) : jobs.length === 0 ? (
+                <div>No jobs found.</div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="min-w-full border-collapse">
+                    <thead>
+                      <tr>
+                        <th className="text-left p-2 border-b">ID</th>
+                        <th className="text-left p-2 border-b">File</th>
+                        <th className="text-left p-2 border-b">User</th>
+                        <th className="text-left p-2 border-b">Rows</th>
+                        <th className="text-left p-2 border-b">Created</th>
+                        <th className="text-left p-2 border-b">Status</th>
+                        <th className="text-left p-2 border-b">Output</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {jobs.map((j) => (
+                        <tr key={j.id}>
+                          <td className="p-2 border-b align-top">{j.id}</td>
+                          <td className="p-2 border-b align-top">{j.fileName}</td>
+                          <td className="p-2 border-b align-top">{j.userEmail || '—'}</td>
+                          <td className="p-2 border-b align-top">{j.rowCount ?? '—'}</td>
+                          <td className="p-2 border-b align-top">{fmtDate(j.createdAt)}</td>
+                          <td className="p-2 border-b align-top">{j.status}</td>
+                          <td className="p-2 border-b align-top">{j.outputUrl ? (<a href={j.outputUrl} className="text-blue-600 underline">Download</a>) : '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
 
-{forbidden ? (
-<div className="p-3 rounded-md border border-red-300 bg-red-50 text-red-800">
-You do not have admin access.
-{who ? (
-<>
-<span> </span>Detected as <strong>{who}</strong>. Ensure your email is in <code>ADMIN_EMAILS</code> and your session includes it.
-</>
-) : null}
-</div>
-) : (
-<div className="grid grid-cols-1 gap-6">
-<AdminMasterRecordSection />
-<AdminLLMCacheSection />
+            {/* Delete jobs with confirmation */}
+            <section>
+              <h2 className="text-xl font-semibold mb-2">Delete Jobs</h2>
+              <p className="text-sm mb-2">Choose filters. A preview count will be shown before deletion.</p>
+              <div className="flex flex-col gap-2 max-w-md">
+                <input type="date" value={deleteFilters.date} onChange={(e) => setDeleteFilters({ ...deleteFilters, date: e.target.value })} className="border rounded p-1" />
+                <select value={deleteFilters.status} onChange={(e) => setDeleteFilters({ ...deleteFilters, status: e.target.value })} className="border rounded p-1">
+                  <option value="">--Status--</option>
+                  <option value="queued">Queued</option>
+                  <option value="running">Running</option>
+                  <option value="completed">Completed</option>
+                  <option value="failed">Failed</option>
+                </select>
+                <input type="text" placeholder="User email" value={deleteFilters.user} onChange={(e) => setDeleteFilters({ ...deleteFilters, user: e.target.value })} className="border rounded p-1" />
+                <div className="flex items-center gap-2">
+                  <button onClick={async () => { await previewDelete(); }} className="px-3 py-2 rounded bg-neutral-800 text-white w-fit">Preview</button>
+                  {previewCount != null && <span className="text-sm text-neutral-600">Matches: {previewCount}</span>}
+                </div>
+                {confirming && (
+                  <div className="p-3 border rounded bg-yellow-50 text-yellow-900">
+                    Delete <strong>{previewCount}</strong> job(s)? This cannot be undone.
+                    <div className="mt-2 flex gap-2">
+                      <button onClick={async () => { await doDelete(); }} className="px-3 py-2 rounded bg-red-700 text-white">Confirm delete</button>
+                      <button onClick={() => { setConfirming(false); setPreviewCount(null); }} className="px-3 py-2 rounded border">Cancel</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </section>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+};
 
-
-{/* Jobs list — now wrapped in a card */}
-<section className="border rounded-2xl p-6 bg-white shadow-sm">
-<div className="mb-3 flex items-center justify-between">
-<h2 className="text-lg font-medium">All Jobs</h2>
-<div className="flex items-center gap-2">
-<button onClick={fetchJobs} className="inline-flex items-center rounded-md px-3 py-2 border border-neutral-300 hover:bg-neutral-50 text-sm">Refresh</button>
-</div>
-</div>
-
-
-{loading ? (
-<div className="text-sm">Loading…</div>
-) : jobs.length === 0 ? (
-<div className="text-sm text-neutral-600">No jobs found.</div>
-) : (
-<div className="overflow-x-auto">
-<table className="min-w-full text-sm">
 export default AdminPage;
