@@ -1,25 +1,24 @@
+# netlify.toml (clean)
+
 [build]
-command = "npm run build"
-publish = "dist"
-functions = "netlify/functions"
+  command   = "npm run build"
+  publish   = "dist"
+  functions = "netlify/functions"
 
 [build.environment]
-# Pin major only so the image picks a valid 20.x
-NODE_VERSION = "20"
+  # Pin major only so the image picks a valid 20.x
+  NODE_VERSION = "20"
 
-[functions]
-node_bundler = "esbuild"
-directory = "netlify/functions"
-
+# Single [functions] table — set global bundler once
 [functions]
   node_bundler = "esbuild"
 
-# default: keep functions lean (no Prisma by default)
+# Default: keep functions lean (no Prisma by default)
 [functions."*"]
   external_node_modules = []
   included_files = []
 
-# DB-backed functions ONLY:
+# DB-backed functions ONLY (include Prisma client + engines)
 [functions."process-upload-background"]
   external_node_modules = ["@prisma/client","prisma"]
   included_files = ["node_modules/.prisma/client/**"]  # engines only
@@ -45,18 +44,19 @@ directory = "netlify/functions"
   included_files = ["node_modules/.prisma/client/**"]
 
 [[redirects]]
-from = "/api/*"
-to = "/.netlify/functions/:splat"
-status = 200
-
-[[redirects]]
-  from = "/admin-llm-cache"
-  to = "/.netlify/functions/admin-llm-cache"
+  from = "/api/*"
+  to   = "/.netlify/functions/:splat"
   status = 200
 
 [[redirects]]
-from = "/*"
-to = "/index.html"
-status = 200
+  from = "/admin-llm-cache"
+  to   = "/.netlify/functions/admin-llm-cache"
+  status = 200
+
+[[redirects]]
+  from = "/*"
+  to   = "/index.html"
+  status = 200
+
 
 
