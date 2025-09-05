@@ -1,13 +1,12 @@
 // netlify/functions/admin-master-record.js (v2)
-// Adds robust summary normalization and explicit ISO dates
+// Use shared admin gate helper instead of inline auth logic
 
 import { PrismaClient } from '@prisma/client'
-import authUtilsCjs from './utils/auth.js'
+import { requireAdmin } from './_admin-gate.mjs'
 
 const prisma = globalThis.__prisma || new PrismaClient()
 // @ts-ignore
 globalThis.__prisma = prisma
-const { getUserFromRequest } = authUtilsCjs
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -16,20 +15,10 @@ function json(body, status = 200) {
   })
 }
 
-function isAdmin(user) {
-  if (!user) return false
-  if (user.isAdmin === true) return true
-  const allow = (process.env.ADMIN_EMAILS || '')
-    .split(/[\s,]+/)
-    .filter(Boolean)
-    .map((s) => s.toLowerCase())
-  return allow.includes(String(user.email || '').toLowerCase())
-}
-
 export default async (req) => {
   try {
-    const user = await getUserFromRequest({ headers: { cookie: req.headers.get('cookie') || '' } })
-    if (!user || !isAdmin(user)) return json({ error: 'You do not have admin access' }, 403)
+    const gate = await requireAdmin(req)
+    if (!gate.allowed) return json({ error: 'You do not have admin access' }, 403)
 
     const url = new URL(req.url)
     const op = url.searchParams.get('op') || 'summary'

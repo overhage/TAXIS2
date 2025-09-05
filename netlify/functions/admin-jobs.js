@@ -1,29 +1,28 @@
-// netlify/functions/admin-jobs.js
-// Admin jobs API with safe delete + count preview
+// netlify/functions/admin-jobs.js — Admin jobs API using unified admin gate
+// Uses shared gate helper: ./_admin-gate.mjs
 // Supports:
-//   GET    /api/admin-jobs                       -> list jobs (existing behavior)
-//   GET    /api/admin-jobs?op=count&...          -> count jobs matching delete filters (preview)
-//   DELETE /api/admin-jobs { date, status, user }-> delete matching jobs (with same filters)
+//   GET    /api/admin-jobs                       -> list jobs
+//   GET    /api/admin-jobs?op=count&...          -> count jobs matching filters
+//   DELETE /api/admin-jobs { date, status, user }-> delete matching jobs
 
 import { PrismaClient } from '@prisma/client'
-import authUtilsCjs from './utils/auth.js'
+import { requireAdmin } from './_admin-gate.mjs'
 
+// Prisma (singleton across invocations)
 const prisma = globalThis.__prisma || new PrismaClient()
 // @ts-ignore
 globalThis.__prisma = prisma
-const { getUserFromRequest } = authUtilsCjs
 
+/* -------------------
+   small JSON helper
+------------------- */
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 }
 
-function isAdmin(user) {
-  if (!user) return false
-  if (user.isAdmin === true) return true
-  const allow = (process.env.ADMIN_EMAILS || '').split(/[\s,]+/).filter(Boolean).map((s) => s.toLowerCase())
-  return allow.includes(String(user.email || '').toLowerCase())
-}
-
+/* -----------------------------------------
+   date helper (unchanged from your version)
+----------------------------------------- */
 function endOfDayISO(dateStr) {
   if (!dateStr) return null
   const d = new Date(dateStr)
@@ -48,11 +47,13 @@ async function buildWhere({ date, status, user }) {
   return where
 }
 
+/* -------------------------------
+   Main handler
+-------------------------------- */
 export default async (req) => {
   try {
-    const eventLike = { headers: { cookie: req.headers.get('cookie') || '' } }
-    const user = await getUserFromRequest(eventLike)
-    if (!isAdmin(user)) return json({ error: 'Forbidden' }, 403)
+    const gate = await requireAdmin(req)
+    if (!gate.allowed) return gate.forbidden()
 
     const url = new URL(req.url)
     const method = req.method.toUpperCase()
