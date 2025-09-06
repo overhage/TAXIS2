@@ -217,8 +217,11 @@ async function lookupConceptMeta (conceptId) {
   const cid = Number(conceptId)
   console.log(`[lookupConceptMetaByAny] IN  codeOrId=${String(conceptId)}`)
   if (!Number.isFinite(cid)) return null
+  console.log(`[lookupConceptMetaByAny] isFinite  codeOrId=${String(conceptId)}`)
   if (conceptCache.has(cid)) return conceptCache.get(cid)
+  console.log(`[lookupConceptMetaByAny] notinConceptCache  codeOrId=${String(conceptId)}`)  
   try {
+    console.log(`[lookupConceptMetaByAny] inside try  codeOrId=${String(conceptId)}`)  
     const c = await prisma.concept.findUnique({ where: { concept_id: cid } })
       .catch(async () => await prisma.concept.findFirst({ where: { concept_id: cid } }))
     if (!c) { conceptCache.set(cid, null); return null }
