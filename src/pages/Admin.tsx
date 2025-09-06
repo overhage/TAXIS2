@@ -225,7 +225,7 @@ const AdminPage: React.FC = () => {
     <div>
       <Header title="Administrator Dashboard" />
       {/* Align with the left edge of the owl logo: push main content right a bit more */}
-      <main className="pl-8 sm:pl-12 md:pl-28 lg:pl-32 pr-6 md:pr-12 py-6 space-y-6 max-w-7xl mx-auto">
+      <main className="pl-8 sm:pl-12 md:pl-32 lg:pl-40 pr-6 md:pr-12 py-6 space-y-6 max-w-7xl mx-auto">
         {user && (
           <div className="text-sm mb-2">
             Signed in as <strong>{user?.name || user?.email || 'User'}</strong>
