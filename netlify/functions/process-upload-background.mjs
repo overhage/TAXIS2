@@ -6,9 +6,18 @@ import { parse as parseCsv } from 'csv-parse/sync'
 import * as XLSX from 'xlsx'
 import { PrismaClient } from '@prisma/client'
 
-const prisma = globalThis.__prisma || new PrismaClient()
-// @ts-ignore
-globalThis.__prisma = prisma
+const prisma =
+  globalThis.__prisma ??
+  new PrismaClient({
+    log: [{ level: 'query', emit: 'event' }, 'info', 'warn', 'error']
+  })
+
+if (!globalThis.__prisma) {
+  prisma.$on('query', (e) => {
+    console.log('PRISMA SQL:', e.query, 'PARAMS:', e.params)
+  })
+  globalThis.__prisma = prisma
+}
 
 // ===== Configs =====
 const MAX_RUN_MS = Number(process.env.MAX_RUN_MS || 12 * 60 * 1000)
@@ -229,30 +238,37 @@ async function lookupConceptMeta (conceptId) {
 
     // diagnostic
 
-    console.log('DB_URL:', process.env.DATABASE_URL);
+    try {
+  console.log('DB_URL:', process.env.DATABASE_URL)
 
-    const loc = await prisma.$queryRaw`
-      select current_database() as current_database, current_schema() as current_schema
-    `;
-    console.log('DB/schema:', loc);
+  const loc = await prisma.$queryRaw`
+    select current_database() as current_database, current_schema() as current_schema
+  `
+  console.log('DB/schema:', loc)
 
-    const countRows = await prisma.$queryRaw`
-      select count(*)::int as n from public.concept
-    `;
-    const count = Array.isArray(countRows) && countRows[0] ? countRows[0].n : null;
-    console.log('public.concept count:', count);
+  const countRows = await prisma.$queryRaw`
+    select count(*)::int as n from public.concept
+  `
+  console.log('public.concept count:', countRows?.[0]?.n)
 
-    console.log('cid typeof/value:', typeof cid, cid);
+  const row = await prisma.$queryRaw`
+    select concept_id, concept_name, vocabulary_id, domain_id
+    from public.concept
+    where concept_id = ${cid}
+  `
+  console.log('raw match:', row)
 
-    const row = await prisma.$queryRaw`
-      select concept_id, concept_name, vocabulary_id, domain_id
-      from public.concept
-      where concept_id = ${cid}
-    `;
-    console.log('raw match:', row);
+  const c =
+    (await prisma.concept.findUnique({ where: { concept_id: cid } })) ??
+    (await prisma.concept.findFirst({ where: { concept_id: cid } }))
 
-    const prisma = new PrismaClient({ log: [{ level: 'query', emit: 'event' }, 'info', 'warn', 'error'] })
-    prisma.$on('query', e => console.log('PRISMA SQL:', e.query, 'PARAMS:', e.params))
+  // ...
+} catch (e) {
+  console.error('[lookupConceptMeta] diagnostics/lookup failed:', e?.message || e)
+  conceptCache.set(cid, null)
+  return null
+}
+
 
 
     // end diagnostics 
