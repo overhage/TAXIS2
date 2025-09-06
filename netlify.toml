@@ -43,6 +43,10 @@
   external_node_modules = ["@prisma/client","prisma"]
   included_files = ["node_modules/.prisma/client/**"]
 
+[functions."admin-llm-cache"]
+  external_node_modules = ["@prisma/client","prisma"]
+  included_files = ["node_modules/.prisma/client/**"]  
+
 [functions."jobs"]
   external_node_modules = ["@prisma/client","prisma"]
   included_files = ["node_modules/.prisma/client/**"]

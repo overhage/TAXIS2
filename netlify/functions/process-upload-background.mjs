@@ -5,6 +5,7 @@ import { getStore } from '@netlify/blobs'
 import { parse as parseCsv } from 'csv-parse/sync'
 import * as XLSX from 'xlsx'
 import { PrismaClient } from '@prisma/client'
+import { createHash } from 'node:crypto'
 
 const prisma = globalThis.__prisma ?? new PrismaClient()
 
@@ -78,6 +79,24 @@ const FLOAT_FIELDS = new Set([
 const toFloatOrNull = (v) => {
   const n = Number(v)
   return Number.isFinite(n) ? n : null
+}
+
+function stablePromptKey(row) {
+  // Include only the fields that define the prompt/response semantics
+  const payload = {
+    model: row.model ?? '',
+    pairId: row.pairId ?? '',
+    system_a: row.system_a ?? '',
+    code_a: row.code_a ?? '',
+    system_b: row.system_b ?? '',
+    code_b: row.code_b ?? '',
+    concept_a_t: row.concept_a_t ?? '',
+    concept_b_t: row.concept_b_t ?? '',
+    relationship_code: row.relationship_code ?? '',
+    relationship_type: row.relationship_type ?? '',
+    prompt_version: process.env.PROMPT_VERSION ?? 'v1'
+  }
+  return createHash('sha256').update(JSON.stringify(payload)).digest('hex')
 }
 
 function getExtFromName (name = '') { const i = name.lastIndexOf('.'); return i >= 0 ? name.slice(i).toLowerCase() : '.csv' }
@@ -580,6 +599,45 @@ export default async (req) => {
         await prisma.job.update({ where: { id: jobId }, data: { rowsProcessed: offset + 1, outputBlobKey } })
         lastFlush = now
       }
+
+if (llmCacheBatch.length) {
+  const rowsForDb = llmCacheBatch.map(r => ({
+    promptKey: stablePromptKey(r),
+    // Store the whole row so you keep everything you already capture
+    result: JSON.stringify(r),
+    tokensIn: Number.isFinite(+r.prompt_tokens) ? +r.prompt_tokens : null,
+    tokensOut: Number.isFinite(+r.completion_tokens) ? +r.completion_tokens : null,
+    model: r.model ?? null
+  }))
+
+  try {
+    // Fast path for Postgres; ignores duplicates by promptKey
+    await prisma.llmCache.createMany({ data: rowsForDb, skipDuplicates: true })
+  } catch (e) {
+    // Fallback: idempotent upserts (slower, but safe everywhere)
+    for (const d of rowsForDb) {
+      try {
+        await prisma.llmCache.upsert({
+          where: { promptKey: d.promptKey },
+          create: d,
+          update: {
+            // If you want “first write wins”, remove this update block
+            result: d.result,
+            tokensIn: d.tokensIn,
+            tokensOut: d.tokensOut,
+            model: d.model
+          }
+        })
+      } catch (e2) {
+        console.warn('[llmcache.upsert] failed', e2?.message || e2)
+      }
+    }
+  }
+
+  // Clear the in-memory batch (you already do this for the blob path)
+  llmCacheBatch.length = 0
+}
+
 
       if (timeUp) break
     }

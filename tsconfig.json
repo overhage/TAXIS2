@@ -5,6 +5,7 @@
 "lib": ["DOM", "ESNext"],
 "module": "ESNext",
 "moduleResolution": "Bundler",
+"types": ["@netlify/functions", "node"],
 "strict": true,
 "jsx": "react-jsx",
 "noEmit": true,
@@ -12,5 +13,5 @@
 "esModuleInterop": true,
 "allowSyntheticDefaultImports": true
 },
-"include": ["src"]
+"include": ["src", "netlify/functions", "vite-env.d.ts"]
 }
