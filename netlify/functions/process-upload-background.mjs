@@ -251,6 +251,10 @@ async function lookupConceptMeta (conceptId) {
     `;
     console.log('raw match:', row);
 
+    const prisma = new PrismaClient({ log: [{ level: 'query', emit: 'event' }, 'info', 'warn', 'error'] })
+    prisma.$on('query', e => console.log('PRISMA SQL:', e.query, 'PARAMS:', e.params))
+
+
     // end diagnostics 
 
     const c = await prisma.concept.findUnique({ where: { concept_id: cid } })
