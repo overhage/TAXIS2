@@ -215,14 +215,14 @@ function buildUpdateDataFromRow (existing, row, fieldMap) {
 const conceptCache = new Map()
 async function lookupConceptMeta (conceptId) {
   const cid = Number(conceptId)
-  console.log(`[lookupConceptMetaByAny] IN  codeOrId=${String(conceptID)}`)
+  console.log(`[lookupConceptMetaByAny] IN  codeOrId=${String(conceptId)}`)
   if (!Number.isFinite(cid)) return null
   if (conceptCache.has(cid)) return conceptCache.get(cid)
   try {
     const c = await prisma.concept.findUnique({ where: { concept_id: cid } })
       .catch(async () => await prisma.concept.findFirst({ where: { concept_id: cid } }))
     if (!c) { conceptCache.set(cid, null); return null }
-    console.log(`[lookupConceptMetaByAny] OUT concept_id=${String(conceptID)}    name="${c?.concept_name ?? ''}"  vocabulary_id=${c?.vocabulary_id ?? ''}  concept_class_id=${c?.concept_class_id ?? ''}  domain_id=${c?.domain_id ?? ''}`)
+    console.log(`[lookupConceptMetaByAny] OUT concept_id=${String(conceptId)}    name="${c?.concept_name ?? ''}"  vocabulary_id=${c?.vocabulary_id ?? ''}  concept_class_id=${c?.concept_class_id ?? ''}  domain_id=${c?.domain_id ?? ''}`)
     const meta = { concept_name: c.concept_name || '', vocabulary_id: c.vocabulary_id || '', concept_class_id: c.concept_class_id || '' }
     conceptCache.set(cid, meta)
     return meta
