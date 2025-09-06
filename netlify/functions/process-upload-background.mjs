@@ -240,6 +240,12 @@ async function lookupConceptMeta (conceptId) {
 
     try {
   console.log('DB_URL:', process.env.DATABASE_URL)
+  const modelDelegates = Object.keys(prisma).filter(
+  k => typeof prisma[k]?.findUnique === 'function'
+)
+console.log('[Prisma delegates]', modelDelegates)
+// Also: console.log('typeof prisma.concept:', typeof prisma.concept)
+
 
   const loc = await prisma.$queryRaw`
     select current_database() as current_database, current_schema() as current_schema
