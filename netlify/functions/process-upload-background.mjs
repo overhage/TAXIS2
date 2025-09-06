@@ -211,11 +211,18 @@ function buildUpdateDataFromRow (existing, row, fieldMap) {
   return data
 }
 
+function toIntStrict(v) {
+  const s = String(v).trim();
+  if (!/^-?\d+$/.test(s)) return null;        // reject "123abc", "1.2", "", "I10"
+  const n = Number(s);
+  return Number.isSafeInteger(n) ? n : null;  // guard against > 2^53-1
+}
+
 // ===== OMOP Concept lookup =====
 const conceptCache = new Map()
 async function lookupConceptMeta (conceptId) {
-  const cid = Number(conceptId)
-  if (!Number.isFinite(cid)) return null
+  const cid = toIntStrict(conceptId)
+  if (cid == null) return null
   if (conceptCache.has(cid)) return conceptCache.get(cid)
   try {
     console.log(`[lookupConceptMetaByAny] inside try  codeOrId=${String(conceptId)}  cid=${String(cid)}`)  
