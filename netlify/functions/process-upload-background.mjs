@@ -229,24 +229,27 @@ async function lookupConceptMeta (conceptId) {
 
     // diagnostic
 
-    console.log('DB_URL:', process.env.DATABASE_URL)
+    console.log('DB_URL:', process.env.DATABASE_URL);
 
-const loc = await prisma.$queryRaw<
-  { current_database: string; current_schema: string }[]
->`select current_database(), current_schema()`
-console.log('DB/schema:', loc)
+    const loc = await prisma.$queryRaw`
+      select current_database() as current_database, current_schema() as current_schema
+    `;
+    console.log('DB/schema:', loc);
 
-const count = await prisma.$queryRaw<{ n: number }[]>
-`select count(*)::int as n from public.concept`
-console.log('public.concept count:', count?.[0]?.n)
+    const countRows = await prisma.$queryRaw`
+      select count(*)::int as n from public.concept
+    `;
+    const count = Array.isArray(countRows) && countRows[0] ? countRows[0].n : null;
+    console.log('public.concept count:', count);
 
-console.log('cid typeof/value:', typeof cid, cid)
+    console.log('cid typeof/value:', typeof cid, cid);
 
-const row = await prisma.$queryRaw<
-  any[]
->`select concept_id, concept_name, vocabulary_id, domain_id
-  from public.concept where concept_id = ${cid}`
-console.log('raw match:', row)
+    const row = await prisma.$queryRaw`
+      select concept_id, concept_name, vocabulary_id, domain_id
+      from public.concept
+      where concept_id = ${cid}
+    `;
+    console.log('raw match:', row);
 
     // end diagnostics 
 
