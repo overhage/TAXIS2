@@ -22,19 +22,6 @@ async function fetchJson(url: string, init?: RequestInit) {
   return data;
 }
 
-// Try multiple endpoints until one returns valid JSON
-async function fetchJsonFirst(urls: string[], init?: RequestInit) {
-  const errors: string[] = [];
-  for (const u of urls) {
-    try {
-      const data = await fetchJson(u, init);
-      return { data, usedUrl: u };
-    } catch (e: any) {
-      errors.push(`${u}: ${e?.message || e}`);
-    }
-  }
-  throw new Error('All candidate endpoints failed.\n' + errors.join('\n'));
-}
 
 function AdminMasterRecordSection() {
   const [summary, setSummary] = useState<{ rows: number; lastUpdated: string | null }>({ rows: 0, lastUpdated: null });
@@ -153,129 +140,6 @@ function AdminMasterRecordSection() {
   );
 }
 
-function AdminLLMCacheSection() {
-  const [rows, setRows] = useState<any[]>([]);
-  const [cols, setCols] = useState<string[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState('');
-  const [jobId, setJobId] = useState('');
-  const [stats, setStats] = useState<{ calls: number; sumPrompt: number; sumCompletion: number; sumTotal: number; avgPerCall: number } | null>(null);
-  const [llmApiBase, setLlmApiBase] = useState<string>('/.netlify/functions/admin-llm-cache');
-  
-  // Candidate endpoints: Netlify Function (canonical), pretty redirect (optional), then any /api proxies
-  const buildLlmUrls = (qs: URLSearchParams) => [
-    `/.netlify/functions/admin-llm-cache?${qs}`, // canonical on Netlify
-    `/admin-llm-cache?${qs.toString()}`,         // pretty path (works if redirect/config is present)
-    `/api/admin-llm-cache?${qs}`,                // optional Next API proxy (not currently present)
-    `/api/admin-llmcache?${qs}`,                 // legacy fallback (not present)
-  ];
-
-  const fetchTail = async () => {
-    setErr('');
-    setLoading(true);
-    try {
-      const qs = new URLSearchParams({ op: 'tail', n: '5' });
-      if (jobId.trim()) qs.set('jobId', jobId.trim());
-      const { data: j, usedUrl } = await fetchJsonFirst(buildLlmUrls(qs), { credentials: 'include' });
-      setLlmApiBase(usedUrl.split('?')[0]);
-      setRows(j.rows || []);
-      setCols(j.columns || (j.rows?.length ? Object.keys(j.rows[0]) : []));
-    } catch (e: any) {
-      setErr(String(e?.message || e));
-      setRows([]);
-      setCols([]);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const fetchStats = async () => {
-    try {
-      const qs = new URLSearchParams({ op: 'stats' });
-      if (jobId.trim()) qs.set('jobId', jobId.trim());
-      const { data: j, usedUrl } = await fetchJsonFirst(buildLlmUrls(qs), { credentials: 'include' });
-      setLlmApiBase(usedUrl.split('?')[0]);
-      const { calls = 0, sumPrompt = 0, sumCompletion = 0, sumTotal = 0, avgPerCall = 0 } = j || {};
-      setStats({ calls, sumPrompt, sumCompletion, sumTotal, avgPerCall });
-    } catch {
-      // silent — shown on demand or via tail error
-    }
-  };
-
-  useEffect(() => {
-    fetchTail();
-    fetchStats();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const csvHref = useMemo(() => {
-    const qs = new URLSearchParams({ op: 'download' });
-    if (jobId.trim()) qs.set('jobId', jobId.trim());
-    const base = llmApiBase || '/.netlify/functions/admin-llm-cache';
-    return `${base}?${qs.toString()}`;
-  }, [jobId, llmApiBase]);
-
-  return (
-    <section className="border rounded-2xl p-6 bg-white shadow-sm">
-      <div className="flex items-center justify-between gap-4 flex-wrap">
-        <div>
-          <h2 className="text-xl font-semibold">LLM Cache (latest 5)</h2>
-          <p className="text-sm text-neutral-600">Inspect recent cached LLM classifications. Filter by Job ID to focus on a single upload.</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button onClick={() => { fetchTail(); fetchStats(); }} className="inline-flex items-center rounded-md px-3 py-2 border border-neutral-300 hover:bg-neutral-50 text-sm">Refresh</button>
-          <a href={csvHref} className="inline-flex items-center rounded-md px-3 py-2 border border-neutral-300 hover:bg-neutral-50 text-sm font-medium">Download CSV</a>
-        </div>
-      </div>
-
-      <div className="mt-4 flex items-end gap-2">
-        <div className="flex flex-col">
-          <label className="text-xs text-neutral-600">Filter by Job ID</label>
-          <input value={jobId} onChange={(e) => setJobId(e.target.value)} placeholder="e.g. clxyz…" className="border rounded-md px-3 py-2 w-80" />
-        </div>
-        <button onClick={() => { fetchTail(); fetchStats(); }} className="px-3 py-2 rounded-md border">Apply</button>
-        <button onClick={() => { setJobId(''); fetchTail(); fetchStats(); }} className="px-3 py-2 rounded-md border">Clear</button>
-        {stats && (
-          <div className="ml-auto text-sm text-neutral-700">
-            <span className="mr-4">Calls: <strong>{stats.calls}</strong></span>
-            <span className="mr-4">Total tokens: <strong>{stats.sumTotal}</strong></span>
-            <span className="mr-4">Avg tokens/call: <strong>{stats.avgPerCall}</strong></span>
-          </div>
-        )}
-      </div>
-
-      {err && <div className="mt-3 text-sm text-red-600 whitespace-pre-wrap">{err}</div>}
-
-      {loading ? (
-        <div className="mt-4 text-sm">Loading…</div>
-      ) : rows.length === 0 ? (
-        <div className="mt-4 text-sm text-neutral-600">No records found.</div>
-      ) : (
-        <div className="mt-4 overflow-x-auto">
-          <table className="min-w-full text-sm">
-            <thead>
-              <tr className="text-left border-b">
-                {cols.map((c) => (
-                  <th key={c} className="py-2 pr-4">{c}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r, idx) => (
-                <tr key={idx} className="border-b align-top">
-                  {cols.map((c) => (
-                    <td key={c} className="py-2 pr-4 whitespace-pre-wrap">{String(r[c] ?? '')}</td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
-  );
-}
-
 interface AdminJobRow { id: string; fileName: string; userEmail?: string; rowCount?: number; createdAt: string; status: string; outputUrl?: string; }
 
 const AdminPage: React.FC = () => {
@@ -380,7 +244,6 @@ const AdminPage: React.FC = () => {
         ) : (
           <div className="grid grid-cols-1 gap-6">
             <AdminMasterRecordSection />
-            <AdminLLMCacheSection />
 
             {/* Jobs list — now wrapped in a card */}
             <section className="border rounded-2xl p-6 bg-white shadow-sm">
