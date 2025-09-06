@@ -23,6 +23,8 @@ const PRIMARY_MODEL = process.env.OPENAI_API_MODEL || 'gpt-4o-mini'
 const MODEL_FALLBACKS = [PRIMARY_MODEL, 'gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini'].filter(Boolean)
 const LLM_CACHE_STORE = process.env.LLM_CACHE_STORE || 'cache'
 const LLM_CACHE_BLOB_KEY = process.env.LLM_CACHE_BLOB_KEY || 'llmcache.csv'
+const LIFT_MIN_FOR_LLM = Number(process.env.LIFT_MIN_FOR_LLM ?? 1.0)
+
 
 // Where to find the MasterRecord mapping spreadsheet
 const CONFIG_STORE = process.env.CONFIG_STORE || 'config'
@@ -453,8 +455,25 @@ export default async (req) => {
       if (!existing) {
         const events_ab = pickEventsAb(row)
         const events_ab_ae = pickEventsAe(row)
-        const cls = await classifyRelationship({ conceptAText: concept_a_name, conceptBText: concept_b_name, events_ab, events_ab_ae })
-        ;({ relCode, relType, rationalText, usedModel, usage } = cls)
+        const liftVal = Number(row.lift)
+        const shouldLLM = Number.isFinite(liftVal) && liftVal > LIFT_MIN_FOR_LLM
+
+        if (shouldLLM) {
+          const cls = await classifyRelationship({
+            conceptAText: concept_a_name,
+            conceptBText: concept_b_name,
+            events_ab,
+            events_ab_ae
+          })
+          ;({ relCode, relType, rationalText, usedModel, usage } = cls)
+        } else {
+          // Skip LLM; default to “No clear relationship”
+          relCode = 11
+          relType = RELATIONSHIP_TYPES[11]
+          rationalText = 'Skipped LLM: lift ≤ threshold'
+          usedModel = PRIMARY_MODEL
+          usage = {}
+        }
 
         // Base create data (authoritative from OMOP for identity fields)
         const baseCreate = {
@@ -509,6 +528,7 @@ export default async (req) => {
         // await prisma.masterRecord.create({ data: coerceTypesInPlace({ ...baseCreate, ...guarded }) })
 
         // LLM cache line
+      if (shouldLLM) {
         llmCacheBatch.push({
           timestamp: new Date().toISOString(),
           jobId,
@@ -529,6 +549,8 @@ export default async (req) => {
           completion_tokens: String(usage?.completion_tokens ?? ''),
           total_tokens: String(usage?.total_tokens ?? '')
         })
+      }
+
       } else {
         // Preserve previous classification fields
         relCode = Number(existing.relationshipCode ?? 11) || 11
