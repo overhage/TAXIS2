@@ -228,6 +228,7 @@ async function lookupConceptMeta (conceptId) {
     console.log(`[lookupConceptMetaByAny] inside try  codeOrId=${String(conceptId)}  cid=${String(cid)}`)  
     const c = await prisma.concept.findUnique({ where: { concept_id: cid } })
       .catch(async () => await prisma.concept.findFirst({ where: { concept_id: cid } }))
+    console.log(`[lookupConceptMetaByAny] before not check concept_id=${String(conceptId)}  cid=${String(cid)}  name="${c?.concept_name ?? ''}"  vocabulary_id=${c?.vocabulary_id ?? ''}  concept_class_id=${c?.concept_class_id ?? ''}  domain_id=${c?.domain_id ?? ''}`)  
     if (!c) { conceptCache.set(cid, null); return null }
     console.log(`[lookupConceptMetaByAny] OUT concept_id=${String(conceptId)}  cid=${String(cid)}  name="${c?.concept_name ?? ''}"  vocabulary_id=${c?.vocabulary_id ?? ''}  concept_class_id=${c?.concept_class_id ?? ''}  domain_id=${c?.domain_id ?? ''}`)
     const meta = { concept_name: c.concept_name || '', vocabulary_id: c.vocabulary_id || '', concept_class_id: c.concept_class_id || '' }
