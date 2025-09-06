@@ -60,19 +60,26 @@ const DashboardPage: React.FC = () => {
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const pollRef = useRef<number | null>(null);
 
-  const fetchJobs = async () => {
-    try {
-      const res = await axios.get('/api/jobs', { withCredentials: true });
-      setJobs(Array.isArray(res.data) ? res.data : []);
-      setLastRefresh(new Date());
-      setError(null);
-    } catch (err: any) {
-      console.error('[Dashboard] jobs fetch failed', err);
-      setError(err?.response?.data?.error || 'Failed to fetch jobs.');
-    } finally {
-      setIsLoading(false);
-    }
-  };
+const fetchJobs = async () => {
+  try {
+    const res = await axios.get('/api/jobs', { withCredentials: true });
+
+    // accept either { jobs: [...] } or [...] for backwards compatibility
+    const list =
+      Array.isArray(res.data?.jobs) ? res.data.jobs :
+      Array.isArray(res.data)      ? res.data      :
+      [];
+
+    setJobs(list);
+    setLastRefresh(new Date());
+    setError(null);
+  } catch (err: any) {
+    console.error('[Dashboard] jobs fetch failed', err);
+    setError(err?.response?.data?.error || 'Failed to fetch jobs.');
+  } finally {
+    setIsLoading(false);
+  }
+};
 
   // Initial fetch
   useEffect(() => {
