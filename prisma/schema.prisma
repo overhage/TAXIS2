@@ -78,7 +78,7 @@ model Job {
 
 
 model OmopCdmConcept {
-concept_id Int @id
+concept_id Int @id @db.Integer
 concept_name String @db.VarChar(255)
 domain_id String @db.VarChar(20)
 vocabulary_id String @db.VarChar(20)
@@ -88,7 +88,6 @@ concept_code String @db.VarChar(50)
 valid_start_date DateTime @db.Date
 valid_end_date DateTime @db.Date @default(dbgenerated("DATE '2099-12-31'"))
 invalid_reason String? @db.Char(1)
-
 
 @@unique([concept_id])
 @@map("concept") // maps this Prisma model to the OMOP table name

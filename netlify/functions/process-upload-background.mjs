@@ -225,7 +225,31 @@ async function lookupConceptMeta (conceptId) {
   if (cid == null) return null
   if (conceptCache.has(cid)) return conceptCache.get(cid)
   try {
-    console.log(`[lookupConceptMetaByAny] inside try  codeOrId=${String(conceptId)}  cid=${String(cid)}`)  
+    console.log(`[lookupConceptMetaByAny] inside try  codeOrId=${String(conceptId)}  cid=${String(cid)}`) 
+
+    // diagnostic
+
+    console.log('DB_URL:', process.env.DATABASE_URL)
+
+const loc = await prisma.$queryRaw<
+  { current_database: string; current_schema: string }[]
+>`select current_database(), current_schema()`
+console.log('DB/schema:', loc)
+
+const count = await prisma.$queryRaw<{ n: number }[]>
+`select count(*)::int as n from public.concept`
+console.log('public.concept count:', count?.[0]?.n)
+
+console.log('cid typeof/value:', typeof cid, cid)
+
+const row = await prisma.$queryRaw<
+  any[]
+>`select concept_id, concept_name, vocabulary_id, domain_id
+  from public.concept where concept_id = ${cid}`
+console.log('raw match:', row)
+
+    // end diagnostics 
+
     const c = await prisma.concept.findUnique({ where: { concept_id: cid } })
       .catch(async () => await prisma.concept.findFirst({ where: { concept_id: cid } }))
     console.log(`[lookupConceptMetaByAny] before not check concept_id=${String(conceptId)}  cid=${String(cid)}  name="${c?.concept_name ?? ''}"  vocabulary_id=${c?.vocabulary_id ?? ''}  concept_class_id=${c?.concept_class_id ?? ''}  domain_id=${c?.domain_id ?? ''}`)  
