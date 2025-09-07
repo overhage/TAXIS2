@@ -14,10 +14,20 @@ export default function Login() {
       <div className="w-full max-w-md">
         <div className="bg-white shadow-lg rounded-2xl p-8 space-y-6 text-center">
           <header className="space-y-3">
+            {/* Brand mark */}
+            <img
+              src="/Taxis%20Owl%20Transparent.png" // file lives in /public
+              alt="TAXIS Owl"
+              className="mx-auto h-16 w-16 object-contain"
+              loading="lazy"
+              decoding="async"
+            />
+
             <h1 className="text-2xl font-semibold tracking-tight">TAXIS Sign in</h1>
+
             <p className="text-xs text-gray-500 max-w-md mx-auto">
-              The Greek word τάξις (táxis) means "arrangement," "order," or "rank". It is derived from the verb
-              tassō, meaning "to arrange or order"
+              The Greek word τάξις (táxis) means "arrangement," "order," or "rank". It is derived from the verb tassō,
+              meaning "to arrange or order". Together, through the TAXIS project, we are working to order clinical knowledge.
             </p>
             <p className="text-sm text-gray-500">Choose a provider to continue</p>
           </header>
@@ -60,15 +70,14 @@ export default function Login() {
             </button>
           </div>
 
-          <div className="pt-2 text-center text-xs text-gray-500">
-            By continuing you agree to our <a href="/terms" className="underline">Terms</a> and{' '}
-            <a href="/privacy" className="underline">Privacy Policy</a>.
-          </div>
+          // <div className="pt-2 text-center text-xs text-gray-500">
+          //   By continuing you agree to our <a href="/terms" className="underline">Terms</a> and{' '}
+          //   <a href="/privacy" className="underline">Privacy Policy</a>.
+          // </div>
 
           <noscript>
             <div className="text-center text-sm text-gray-500">
-              JavaScript is disabled. Use these links:{' '}
-              <a className="underline" href="/api/login?provider=google">Google</a> •{' '}
+              JavaScript is disabled. Use these links: <a className="underline" href="/api/login?provider=google">Google</a> •{' '}
               <a className="underline" href="/api/login?provider=github">GitHub</a>
             </div>
           </noscript>
