@@ -19,7 +19,7 @@ export { prisma }
 const MAX_RUN_MS = Number(process.env.MAX_RUN_MS || 12 * 60 * 1000)
 const FLUSH_EVERY_ROWS = Number(process.env.FLUSH_EVERY_ROWS || 50)
 const FLUSH_EVERY_MS = Number(process.env.FLUSH_EVERY_MS || 5000)
-const PRIMARY_MODEL = process.env.OPENAI_API_MODEL || 'gpt-4.1'
+const PRIMARY_MODEL = process.env.OPENAI_API_MODEL || 'gpt-4-turbo'
 const MODEL_FALLBACKS = [PRIMARY_MODEL, 'gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini'].filter(Boolean)
 const LLM_CACHE_STORE = process.env.LLM_CACHE_STORE || 'cache'
 const LLM_CACHE_BLOB_KEY = process.env.LLM_CACHE_BLOB_KEY || 'llmcache.csv'
@@ -81,6 +81,62 @@ const FLOAT_FIELDS = new Set([
 const toFloatOrNull = (v) => {
   const n = Number(v)
   return Number.isFinite(n) ? n : null
+}
+
+// === BEGIN INSERT: Statistical field calculations (ported from concept_ab.sql step_5) ===
+let odds_ratio = null, or_lower_95 = null, or_upper_95 = null
+if (a_only_h > 0 && b_only_h > 0) {
+odds_ratio = (ab_h * neither_h) / (a_only_h * b_only_h)
+}
+if (ab_h > 0 && a_only_h > 0 && b_only_h > 0 && neither_h > 0) {
+const logOR = Math.log((ab_h * neither_h) / (a_only_h * b_only_h))
+const seOR = Math.sqrt(1.0/ab_h + 1.0/a_only_h + 1.0/b_only_h + 1.0/neither_h)
+or_lower_95 = Math.exp(logOR - 1.96 * seOR)
+or_upper_95 = Math.exp(logOR + 1.96 * seOR)
+}
+
+
+// Directionality (A before B) and Wilson score CI
+let directionality_ratio = null, dir_prop_a_before_b = null, dir_lower_95 = null, dir_upper_95 = null
+const n_dir = a_before_b + b_before_a
+if (n_dir > 0) {
+const p = a_before_b / n_dir
+directionality_ratio = p
+dir_prop_a_before_b = p
+const z = 1.96
+const denom = 1.0 + (z*z) / n_dir
+const center = p + (z*z) / (2*n_dir)
+const margin = z * Math.sqrt((p*(1-p)/n_dir) + ((z*z) / (4*n_dir*n_dir)))
+dir_lower_95 = (center - margin) / denom
+dir_upper_95 = (center + margin) / denom
+}
+
+
+// Confidence measures
+const confidence_a_to_b = nA > 0 ? cooc_obs / nA : null
+const confidence_b_to_a = nB > 0 ? cooc_obs / nB : null
+
+
+// Include directionality_ratio explicitly if not provided
+return {
+expected_obs: nn(expected_obs),
+lift: nn(lift),
+lift_lower_95: nn(lift_lower_95),
+lift_upper_95: nn(lift_upper_95),
+z_score: nn(z_score),
+ab_h: nn(ab_h),
+a_only_h: nn(a_only_h),
+b_only_h: nn(b_only_h),
+neither_h: nn(neither_h),
+odds_ratio: nn(odds_ratio),
+or_lower_95: nn(or_lower_95),
+or_upper_95: nn(or_upper_95),
+directionality_ratio: nn(directionality_ratio),
+dir_prop_a_before_b: nn(dir_prop_a_before_b),
+dir_lower_95: nn(dir_lower_95),
+dir_upper_95: nn(dir_upper_95),
+confidence_a_to_b: nn(confidence_a_to_b),
+confidence_b_to_a: nn(confidence_b_to_a)
 }
 
 function stablePromptKey(row) {
@@ -515,7 +571,9 @@ export default async (req) => {
         delete guarded.code_a
         delete guarded.code_b
 
-        const createData = coerceTypesInPlace({ ...baseCreate, ...guarded })
+        const tempCreate = coerceTypesInPlace({ ...baseCreate, ...guarded })
+        const statsCreate = computeStatisticalFields(tempCreate)
+        const createData = coerceTypesInPlace({ ...tempCreate, ...statsCreate })
 
 
         console.log('[dbg] mappedCreate keys', Object.keys(mappedCreate))
@@ -575,6 +633,19 @@ export default async (req) => {
           ...(typeof type_b_eff === 'string' ? { type_b: type_b_eff } : {}),
           updatedAt: new Date()
         }
+
+        const totals = {
+        cooc_obs: Number(mappedUpdate.cooc_obs ?? existing.cooc_obs ?? 0),
+        nA: Number(mappedUpdate.nA ?? existing.nA ?? 0),
+        nB: Number(mappedUpdate.nB ?? existing.nB ?? 0),
+        total_persons: Number(mappedUpdate.total_persons ?? existing.total_persons ?? 0),
+        a_before_b: Number(mappedUpdate.a_before_b ?? existing.a_before_b ?? 0),
+        b_before_a: Number(mappedUpdate.b_before_a ?? existing.b_before_a ?? 0),
+        cooc_event_count: Number(mappedUpdate.cooc_event_count ?? existing.cooc_event_count ?? 0),
+        same_day: Number(mappedUpdate.same_day ?? existing.same_day ?? 0)
+        }
+        const statsUpdate = computeStatisticalFields(totals)
+        mappedUpdate = { ...mappedUpdate, ...statsUpdate }
 
         await prisma.masterRecord.update({
           where: existing?.id ? { id: existing.id } : { pairId },
