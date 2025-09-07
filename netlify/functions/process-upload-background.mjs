@@ -84,60 +84,109 @@ const toFloatOrNull = (v) => {
 }
 
 // === BEGIN INSERT: Statistical field calculations (ported from concept_ab.sql step_5) ===
-let odds_ratio = null, or_lower_95 = null, or_upper_95 = null
-if (a_only_h > 0 && b_only_h > 0) {
-odds_ratio = (ab_h * neither_h) / (a_only_h * b_only_h)
+// Computes statistical fields from the count fields in a MasterRecord-like object.
+// Accepts either camel (nA/nB) or lower (na/nb) keys.
+function computeStatisticalFields (t = {}) {
+  const nz = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0 }
+  const nn = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null }
+
+  // Pull counts (support both nA/nB and na/nb)
+  const cooc_obs = nz(t.cooc_obs)
+  const nA = nz(t.nA ?? t.na)
+  const nB = nz(t.nB ?? t.nb)
+  const total = nz(t.total_persons)
+  const a_before_b = nz(t.a_before_b)
+  const b_before_a = nz(t.b_before_a)
+  const same_day = nz(t.same_day)                   // not used in stats directly, kept for completeness
+  const cooc_event_count = nz(t.cooc_event_count)   // not used in stats directly, kept for completeness
+
+  // expected co-occurrences under independence
+  let expected_obs = null
+  if (total > 0) {
+    const e = (nA * nB) / total
+    expected_obs = (e === 0 ? null : e)
+  }
+
+  // 2x2 table components
+  const ab = cooc_obs
+  const a_only = Math.max(0, nA - cooc_obs)
+  const b_only = Math.max(0, nB - cooc_obs)
+  const neither = Math.max(0, total - nA - nB + cooc_obs)
+
+  // Haldane–Anscombe correction
+  const ab_h = ab + 0.5
+  const a_only_h = a_only + 0.5
+  const b_only_h = b_only + 0.5
+  const neither_h = neither + 0.5
+
+  // Lift and CI (log-normal approximation)
+  let lift = null, lift_lower_95 = null, lift_upper_95 = null, z_score = null
+  if (expected_obs != null && expected_obs > 0) {
+    lift = cooc_obs / expected_obs
+    z_score = (cooc_obs - expected_obs) / Math.sqrt(expected_obs)
+    if (cooc_obs > 0) {
+      const se = Math.sqrt((1.0 / cooc_obs) + (1.0 / expected_obs))
+      const logR = Math.log(lift)
+      lift_lower_95 = Math.exp(logR - 1.96 * se)
+      lift_upper_95 = Math.exp(logR + 1.96 * se)
+    }
+  }
+
+  // Odds ratio with Haldane–Anscombe and CI
+  let odds_ratio = null, or_lower_95 = null, or_upper_95 = null
+  if (a_only_h > 0 && b_only_h > 0) {
+    odds_ratio = (ab_h * neither_h) / (a_only_h * b_only_h)
+  }
+  if (ab_h > 0 && a_only_h > 0 && b_only_h > 0 && neither_h > 0) {
+    const logOR = Math.log((ab_h * neither_h) / (a_only_h * b_only_h))
+    const seOR = Math.sqrt(1.0/ab_h + 1.0/a_only_h + 1.0/b_only_h + 1.0/neither_h)
+    or_lower_95 = Math.exp(logOR - 1.96 * seOR)
+    or_upper_95 = Math.exp(logOR + 1.96 * seOR)
+  }
+
+  // Directionality (A before B) and Wilson score CI
+  let directionality_ratio = null, dir_prop_a_before_b = null, dir_lower_95 = null, dir_upper_95 = null
+  const n_dir = a_before_b + b_before_a
+  if (n_dir > 0) {
+    const p = a_before_b / n_dir
+    directionality_ratio = p
+    dir_prop_a_before_b = p
+    const z = 1.96
+    const denom = 1.0 + (z*z) / n_dir
+    const center = p + (z*z) / (2*n_dir)
+    const margin = z * Math.sqrt((p*(1-p)/n_dir) + ((z*z) / (4*n_dir*n_dir)))
+    dir_lower_95 = (center - margin) / denom
+    dir_upper_95 = (center + margin) / denom
+  }
+
+  // Confidence measures
+  const confidence_a_to_b = nA > 0 ? cooc_obs / nA : null
+  const confidence_b_to_a = nB > 0 ? cooc_obs / nB : null
+
+  // Return all outputs
+  return {
+    expected_obs: nn(expected_obs),
+    lift: nn(lift),
+    lift_lower_95: nn(lift_lower_95),
+    lift_upper_95: nn(lift_upper_95),
+    z_score: nn(z_score),
+    ab_h: nn(ab_h),
+    a_only_h: nn(a_only_h),
+    b_only_h: nn(b_only_h),
+    neither_h: nn(neither_h),
+    odds_ratio: nn(odds_ratio),
+    or_lower_95: nn(or_lower_95),
+    or_upper_95: nn(or_upper_95),
+    directionality_ratio: nn(directionality_ratio),
+    dir_prop_a_before_b: nn(dir_prop_a_before_b),
+    dir_lower_95: nn(dir_lower_95),
+    dir_upper_95: nn(dir_upper_95),
+    confidence_a_to_b: nn(confidence_a_to_b),
+    confidence_b_to_a: nn(confidence_b_to_a)
+  }
 }
-if (ab_h > 0 && a_only_h > 0 && b_only_h > 0 && neither_h > 0) {
-const logOR = Math.log((ab_h * neither_h) / (a_only_h * b_only_h))
-const seOR = Math.sqrt(1.0/ab_h + 1.0/a_only_h + 1.0/b_only_h + 1.0/neither_h)
-or_lower_95 = Math.exp(logOR - 1.96 * seOR)
-or_upper_95 = Math.exp(logOR + 1.96 * seOR)
-}
+// === END INSERT ===
 
-
-// Directionality (A before B) and Wilson score CI
-let directionality_ratio = null, dir_prop_a_before_b = null, dir_lower_95 = null, dir_upper_95 = null
-const n_dir = a_before_b + b_before_a
-if (n_dir > 0) {
-const p = a_before_b / n_dir
-directionality_ratio = p
-dir_prop_a_before_b = p
-const z = 1.96
-const denom = 1.0 + (z*z) / n_dir
-const center = p + (z*z) / (2*n_dir)
-const margin = z * Math.sqrt((p*(1-p)/n_dir) + ((z*z) / (4*n_dir*n_dir)))
-dir_lower_95 = (center - margin) / denom
-dir_upper_95 = (center + margin) / denom
-}
-
-
-// Confidence measures
-const confidence_a_to_b = nA > 0 ? cooc_obs / nA : null
-const confidence_b_to_a = nB > 0 ? cooc_obs / nB : null
-
-
-// Include directionality_ratio explicitly if not provided
-return {
-expected_obs: nn(expected_obs),
-lift: nn(lift),
-lift_lower_95: nn(lift_lower_95),
-lift_upper_95: nn(lift_upper_95),
-z_score: nn(z_score),
-ab_h: nn(ab_h),
-a_only_h: nn(a_only_h),
-b_only_h: nn(b_only_h),
-neither_h: nn(neither_h),
-odds_ratio: nn(odds_ratio),
-or_lower_95: nn(or_lower_95),
-or_upper_95: nn(or_upper_95),
-directionality_ratio: nn(directionality_ratio),
-dir_prop_a_before_b: nn(dir_prop_a_before_b),
-dir_lower_95: nn(dir_lower_95),
-dir_upper_95: nn(dir_upper_95),
-confidence_a_to_b: nn(confidence_a_to_b),
-confidence_b_to_a: nn(confidence_b_to_a)
-}
 
 function stablePromptKey(row) {
   // Include only the fields that define the prompt/response semantics
