@@ -27,6 +27,7 @@ export default async (req) => {
     const url = new URL(req.url)
     const take = Math.min(Number(url.searchParams.get('limit') || 50), 200)
 
+    // Pull each Job and its related Upload's originalName (and blobKey as a fallback)
     const rows = await prisma.job.findMany({
       where: { userId: user.id },
       orderBy: { createdAt: 'desc' },
@@ -39,18 +40,30 @@ export default async (req) => {
         createdAt: true,
         finishedAt: true,
         outputBlobKey: true,
+        upload: {
+          select: { originalName: true, blobKey: true },
+        },
       },
     })
 
-    const shaped = rows.map((r) => ({
-      id: r.id,
-      status: r.status,
-      rowsTotal: r.rowsTotal,
-      rowsProcessed: r.rowsProcessed,
-      createdAt: r.createdAt,
-      finishedAt: r.finishedAt,
-      outputUrl: r.outputBlobKey ? `/api/download?job=${encodeURIComponent(r.id)}` : null,
-    }))
+    const shaped = rows.map((r) => {
+      const uploadName = r.upload?.originalName ?? null
+      const uploadKeyLeaf = r.upload?.blobKey ? r.upload.blobKey.split('/').pop() : null
+      const outputKeyLeaf = r.outputBlobKey ? r.outputBlobKey.split('/').pop() : null
+
+      return {
+        id: r.id,
+        status: r.status,
+        rowsTotal: r.rowsTotal,
+        rowsProcessed: r.rowsProcessed,
+        createdAt: r.createdAt,
+        finishedAt: r.finishedAt,
+        // normalized filename for the UI: prefer Upload.originalName, then blob key leaf, then output key leaf
+        fileName: uploadName ?? uploadKeyLeaf ?? outputKeyLeaf ?? '—',
+        // keep existing output URL behavior
+        outputUrl: r.outputBlobKey ? `/api/download?job=${encodeURIComponent(r.id)}` : null,
+      }
+    })
 
     return json({ jobs: shaped })
   } catch (err) {
