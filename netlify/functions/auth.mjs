@@ -1,33 +1,33 @@
 // netlify/functions/auth.mjs — Functions v2 (ESM)
-// Adds Google OAuth alongside GitHub. Works behind a redirect such as
-//   /api/*  →  /.netlify/functions/:splat
-// so that:
-//   GET /api/login?provider=github|google        → starts OAuth
-//   GET /api/auth/callback?provider=github|google → handles callback
-//   GET /api/logout                               → clears session
+// Google + GitHub OAuth with DEV‑SAFE cookies and a /api/session endpoint.
 //
-// Env vars required (set in Netlify site settings):
+// Endpoints (assuming a redirect like /api/* → /.netlify/functions/:splat):
+//   GET /api/login?provider=github|google           → start OAuth
+//   GET /api/auth/callback?provider=github|google   → finish OAuth, set cookie, redirect /dashboard
+//   GET /api/logout                                 → clear cookie, redirect /
+//   GET /api/session                                → returns { authenticated, user }
+//
+// Required env vars (Netlify Site Settings → Environment variables):
 //   GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET
 //   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
-//   AUTH_COOKIE_NAME (optional, defaults to 'session')
-//   AUTH_SECRET       (optional, used for HMAC signing if DB session helper missing)
-//   APP_BASE_URL      (optional override, e.g., https://your.site)
+// Optional env vars:
+//   AUTH_COOKIE_NAME (default: 'session')
+//   AUTH_SECRET       (used for HMAC token signing when no DB session helper)
+//   APP_BASE_URL      (override base URL if needed)
 //
-// The function attempts to use a local helper (./utils/auth -> createSession)
-// to persist sessions via Prisma. If that helper is unavailable, it falls back
-// to a signed cookie token (no DB state required).
+// Optional DB session helpers (co‑located util):
+//   ./utils/auth exports: createSession(user) and getSession(id)
+//     - createSession(user) → { id, cookieValue? }
+//     - getSession(id) → { user } | null
 
 import crypto from 'crypto'
 import { createRequire } from 'module'
 const require = createRequire(import.meta.url)
 
-// --- Optional: try to load Prisma + local session helper --------------------
-let createSession /* (user) => Promise<{ id: string, cookieValue: string }> */
-try {
-  ;({ createSession } = require('./utils/auth'))
-} catch {}
+let createSession, getSession // optional helpers
+try { ({ createSession, getSession } = require('./utils/auth')) } catch {}
 
-// --- Utility: base URL detection -------------------------------------------
+// ---------- utilities -------------------------------------------------------
 function getBaseUrl(request) {
   const envBase = process.env.APP_BASE_URL
   if (envBase) return envBase.replace(/\/$/, '')
@@ -36,26 +36,42 @@ function getBaseUrl(request) {
   return `${proto}://${host}`
 }
 
-// --- Utility: cookie helpers ------------------------------------------------
+function isSecureRequest(request) {
+  const xfp = (request.headers.get('x-forwarded-proto') || '').toLowerCase()
+  if (xfp) return xfp === 'https'
+  try { return new URL(request.url).protocol === 'https:' } catch { return true }
+}
+
 const COOKIE = {
   name: process.env.AUTH_COOKIE_NAME || 'session',
-  serialize(value, { maxAgeDays = 30 } = {}) {
+  serialize(value, { maxAgeDays = 30, secure = true } = {}) {
     const parts = [
       `${this.name}=${value}`,
       'Path=/',
       'HttpOnly',
       'SameSite=Lax',
-      'Secure',
       `Max-Age=${Math.floor(maxAgeDays * 24 * 60 * 60)}`
     ]
+    if (secure) parts.push('Secure')
     return parts.join('; ')
   },
-  clear() {
-    return `${this.name}=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0`
+  clear({ secure = true } = {}) {
+    const parts = [ `${this.name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0` ]
+    if (secure) parts.push('Secure')
+    return parts.join('; ')
   }
 }
 
-// --- Fallback: sign / verify a compact token (if no DB sessions) -----------
+function parseCookies(request) {
+  const raw = request.headers.get('cookie') || ''
+  const out = {}
+  raw.split(';').forEach(kv => {
+    const i = kv.indexOf('=')
+    if (i > -1) out[kv.slice(0, i).trim()] = decodeURIComponent(kv.slice(i + 1).trim())
+  })
+  return out
+}
+
 function signToken(payload, secret = process.env.AUTH_SECRET || crypto.randomBytes(32).toString('hex')) {
   const data = Buffer.from(JSON.stringify(payload)).toString('base64url')
   const sig = crypto.createHmac('sha256', secret).update(data).digest('base64url')
@@ -66,17 +82,16 @@ function verifyToken(token, secret = process.env.AUTH_SECRET) {
   try {
     if (!secret) return null
     const [data, sig] = token.split('.')
+    if (!data || !sig) return null
     const expSig = crypto.createHmac('sha256', secret).update(data).digest('base64url')
     if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expSig))) return null
     const payload = JSON.parse(Buffer.from(data, 'base64url').toString('utf8'))
     if (payload.exp && Date.now() > payload.exp) return null
     return payload
-  } catch {
-    return null
-  }
+  } catch { return null }
 }
 
-// --- Provider configuration -------------------------------------------------
+// ---------- providers -------------------------------------------------------
 const Providers = {
   github: {
     name: 'github',
@@ -86,30 +101,23 @@ const Providers = {
     clientId: () => process.env.GITHUB_CLIENT_ID,
     clientSecret: () => process.env.GITHUB_CLIENT_SECRET,
     async getUser(accessToken) {
-      const [userRes, emailRes] = await Promise.all([
+      const [uRes, eRes] = await Promise.all([
         fetch('https://api.github.com/user', { headers: { Authorization: `Bearer ${accessToken}`, 'User-Agent': 'netlify-func' } }),
         fetch('https://api.github.com/user/emails', { headers: { Authorization: `Bearer ${accessToken}`, 'User-Agent': 'netlify-func' } })
       ])
-      if (!userRes.ok) throw new Error('GitHub user fetch failed')
-      const base = await userRes.json()
+      if (!uRes.ok) throw new Error('GitHub user fetch failed')
+      const base = await uRes.json()
       let email = base.email
-      if (!email && emailRes.ok) {
-        const emails = await emailRes.json()
+      if (!email && eRes.ok) {
+        const emails = await eRes.json()
         const primary = Array.isArray(emails) ? emails.find(e => e.primary && e.verified) : null
         email = primary?.email || emails?.[0]?.email
       }
-      return {
-        provider: 'github',
-        providerId: String(base.id),
-        email: email || null,
-        name: base.name || base.login || null,
-        avatarUrl: base.avatar_url || null
-      }
+      return { provider: 'github', providerId: String(base.id), email: email || null, name: base.name || base.login || null, avatarUrl: base.avatar_url || null }
     },
     async exchangeCode({ code, clientId, clientSecret, redirectUri }) {
       const res = await fetch('https://github.com/login/oauth/access_token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
         body: JSON.stringify({ client_id: clientId, client_secret: clientSecret, code, redirect_uri: redirectUri })
       })
       if (!res.ok) throw new Error('GitHub token exchange failed')
@@ -124,39 +132,40 @@ const Providers = {
     clientId: () => process.env.GOOGLE_CLIENT_ID,
     clientSecret: () => process.env.GOOGLE_CLIENT_SECRET,
     async getUser(accessToken) {
-      const res = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-        headers: { Authorization: `Bearer ${accessToken}` }
-      })
-      if (!res.ok) throw new Error('Google userinfo fetch failed')
-      const u = await res.json()
-      return {
-        provider: 'google',
-        providerId: u.sub,
-        email: u.email || null,
-        name: u.name || null,
-        avatarUrl: u.picture || null
-      }
+      const r = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', { headers: { Authorization: `Bearer ${accessToken}` } })
+      if (!r.ok) throw new Error('Google userinfo fetch failed')
+      const u = await r.json()
+      return { provider: 'google', providerId: u.sub, email: u.email || null, name: u.name || null, avatarUrl: u.picture || null }
     },
     async exchangeCode({ code, clientId, clientSecret, redirectUri }) {
-      const params = new URLSearchParams({
-        client_id: clientId,
-        client_secret: clientSecret,
-        code,
-        grant_type: 'authorization_code',
-        redirect_uri: redirectUri
-      })
-      const res = await fetch('https://oauth2.googleapis.com/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: params.toString()
-      })
+      const params = new URLSearchParams({ client_id: clientId, client_secret: clientSecret, code, grant_type: 'authorization_code', redirect_uri: redirectUri })
+      const res = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.toString() })
       if (!res.ok) throw new Error('Google token exchange failed')
       return res.json()
     }
   }
 }
 
-// --- OAuth start ------------------------------------------------------------
+// ---------- routes ----------------------------------------------------------
+function routeFrom(request) {
+  const u = new URL(request.url)
+  const p = u.pathname
+  let op = u.searchParams.get('op') || ''
+  let provider = u.searchParams.get('provider') || 'github'
+  if (!op) {
+    if (/\/login$/.test(p)) op = 'login'
+    else if (/\/callback$/.test(p)) op = 'callback'
+    else if (/\/logout$/.test(p)) op = 'logout'
+    else if (/\/session$/.test(p)) op = 'session'
+  }
+  return { op: op || 'login', provider }
+}
+
+function responseJSON(obj, status = 200) {
+  return new Response(JSON.stringify(obj), { status, headers: { 'Content-Type': 'application/json' } })
+}
+
+// ---------- handlers --------------------------------------------------------
 function startOAuth({ request, providerKey }) {
   const provider = Providers[providerKey]
   if (!provider) return responseJSON({ error: 'unsupported_provider' }, 400)
@@ -166,9 +175,11 @@ function startOAuth({ request, providerKey }) {
   const baseUrl = getBaseUrl(request)
   const redirectUri = `${baseUrl}/api/auth/callback?provider=${provider.name}`
 
-  // state is recommended but optional here; we generate and set a loose cookie
   const state = crypto.randomBytes(16).toString('hex')
-  const stateCookie = [`oauth_state=${state}`, 'Path=/', 'HttpOnly', 'SameSite=Lax', 'Secure', 'Max-Age=900'].join('; ')
+  const stateCookie = [
+    `oauth_state=${state}`,
+    'Path=/', 'HttpOnly', 'SameSite=Lax', isSecureRequest(request) ? 'Secure' : '', 'Max-Age=900'
+  ].filter(Boolean).join('; ')
 
   const url = new URL(provider.authUrl)
   if (provider.name === 'github') {
@@ -176,9 +187,8 @@ function startOAuth({ request, providerKey }) {
     url.searchParams.set('redirect_uri', redirectUri)
     url.searchParams.set('scope', provider.scope)
     url.searchParams.set('state', state)
-    // optional: allow account selection prompt-like behavior:
     url.searchParams.set('allow_signup', 'true')
-  } else if (provider.name === 'google') {
+  } else {
     url.searchParams.set('client_id', clientId)
     url.searchParams.set('redirect_uri', redirectUri)
     url.searchParams.set('response_type', 'code')
@@ -192,16 +202,12 @@ function startOAuth({ request, providerKey }) {
   return new Response(null, { status: 302, headers: { Location: url.toString(), 'Set-Cookie': stateCookie } })
 }
 
-// --- OAuth callback ---------------------------------------------------------
 async function handleCallback({ request, providerKey }) {
   const provider = Providers[providerKey]
   if (!provider) return responseJSON({ error: 'unsupported_provider' }, 400)
-
-  const url = new URL(request.url)
-  const code = url.searchParams.get('code')
-  const state = url.searchParams.get('state')
+  const u = new URL(request.url)
+  const code = u.searchParams.get('code')
   if (!code) return responseJSON({ error: 'missing_code' }, 400)
-  // NOTE: we do not strictly enforce state here because some setups lose the cookie behind proxies.
 
   const clientId = provider.clientId()
   const clientSecret = provider.clientSecret()
@@ -210,73 +216,71 @@ async function handleCallback({ request, providerKey }) {
   const baseUrl = getBaseUrl(request)
   const redirectUri = `${baseUrl}/api/auth/callback?provider=${provider.name}`
 
-  // Exchange the code for tokens
   const tokenPayload = await provider.exchangeCode({ code, clientId, clientSecret, redirectUri })
   const accessToken = tokenPayload.access_token
   if (!accessToken) return responseJSON({ error: 'token_exchange_failed', details: tokenPayload }, 502)
 
-  // Fetch user profile
   const user = await provider.getUser(accessToken)
 
-  // Create session (DB helper if available; otherwise signed cookie)
   let cookieValue
   if (typeof createSession === 'function') {
     const session = await createSession(user)
     cookieValue = session?.cookieValue || session?.id
   } else {
-    const exp = Date.now() + 30 * 24 * 60 * 60 * 1000
-    cookieValue = signToken({ sub: user.provider + ':' + user.providerId, email: user.email, name: user.name, exp })
+    const exp = Date.now() + 30 * 24 * 60 * 60 * 1000 // 30 days
+    cookieValue = signToken({ sub: `${user.provider}:${user.providerId}`, email: user.email, name: user.name, exp })
   }
 
-  const cookie = COOKIE.serialize(cookieValue)
+  const cookie = COOKIE.serialize(cookieValue, { secure: isSecureRequest(request) })
   return new Response(null, { status: 302, headers: { Location: '/dashboard', 'Set-Cookie': cookie } })
 }
 
-// --- Logout -----------------------------------------------------------------
-function handleLogout() {
-  return new Response(null, { status: 302, headers: { Location: '/', 'Set-Cookie': COOKIE.clear() } })
+function handleLogout(request) {
+  const clear = COOKIE.clear({ secure: isSecureRequest(request) })
+  return new Response(null, { status: 302, headers: { Location: '/', 'Set-Cookie': clear } })
 }
 
-// --- Helpers ----------------------------------------------------------------
-function responseJSON(obj, status = 200) {
-  return new Response(JSON.stringify(obj), { status, headers: { 'Content-Type': 'application/json' } })
-}
+async function handleSession(request) {
+  const cookies = parseCookies(request)
+  const raw = cookies[COOKIE.name]
+  if (!raw) return responseJSON({ authenticated: false }, 200)
 
-function routeFrom(request) {
-  const u = new URL(request.url)
-  const p = u.pathname
-  // support either direct function path (/.netlify/functions/auth/...) or pretty /api/*
-  // resolve an op and provider from the URL layout
-  let op = u.searchParams.get('op') || ''
-  let provider = u.searchParams.get('provider') || 'github'
-
-  if (!op) {
-    if (/\/login$/.test(p)) op = 'login'
-    else if (/\/callback$/.test(p)) op = 'callback'
-    else if (/\/logout$/.test(p)) op = 'logout'
+  // DB session path
+  if (typeof getSession === 'function' && !raw.includes('.')) {
+    try {
+      const sess = await getSession(raw)
+      if (sess && sess.user) return responseJSON({ authenticated: true, user: sess.user }, 200)
+    } catch {}
+    return responseJSON({ authenticated: false }, 200)
   }
-  return { op: op || 'login', provider }
+
+  // Signed token path
+  const payload = verifyToken(raw)
+  if (payload) {
+    const { email, name, sub } = payload
+    return responseJSON({ authenticated: true, user: { email, name, sub } }, 200)
+  }
+  return responseJSON({ authenticated: false }, 200)
 }
 
-// --- Netlify Functions v2 handler ------------------------------------------
+// ---------- function export -------------------------------------------------
 export default async (request, context) => {
   try {
     const { op, provider } = routeFrom(request)
-
     if (request.method !== 'GET') return responseJSON({ error: 'method_not_allowed' }, 405)
 
     if (op === 'login') return startOAuth({ request, providerKey: provider })
     if (op === 'callback') return handleCallback({ request, providerKey: provider })
-    if (op === 'logout') return handleLogout()
+    if (op === 'logout') return handleLogout(request)
+    if (op === 'session') return handleSession(request)
 
-    // Default: show a tiny HTML page with provider links (manual testing)
     const base = getBaseUrl(request)
-    const html = `<!doctype html>
-<html><head><meta charset="utf-8"><title>Auth</title></head>
+    const html = `<!doctype html><html><head><meta charset="utf-8"/><title>Auth</title></head>
 <body style="font-family:system-ui;padding:2rem">
   <h1>Sign in</h1>
-  <p><a href="${base}/api/login?provider=github">Continue with GitHub</a></p>
   <p><a href="${base}/api/login?provider=google">Continue with Google</a></p>
+  <p><a href="${base}/api/login?provider=github">Continue with GitHub</a></p>
+  <p style="margin-top:2rem"><a href="${base}/api/session">Check session (JSON)</a></p>
 </body></html>`
     return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } })
   } catch (err) {
