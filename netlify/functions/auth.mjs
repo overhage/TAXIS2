@@ -275,6 +275,9 @@ export default async (request, context) => {
     if (op === 'session') return handleSession(request)
 
     const base = getBaseUrl(request)
+    const redirectUri = provider.name === 'github'
+      ? `${baseUrl}/api/auth/callback`
+      : `${baseUrl}/api/auth/callback?provider=${provider.name}`
     const html = `<!doctype html><html><head><meta charset="utf-8"/><title>Auth</title></head>
 <body style="font-family:system-ui;padding:2rem">
   <h1>Sign in</h1>

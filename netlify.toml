@@ -56,13 +56,13 @@
   included_files = ["node_modules/.prisma/client/**"]
 
 [[redirects]]
-  from = "/api/*"
-  to   = "/.netlify/functions/:splat"
+  from = "/admin-llm-cache"
+  to   = "/.netlify/functions/admin-llm-cache"
   status = 200
 
 [[redirects]]
-  from = "/admin-llm-cache"
-  to   = "/.netlify/functions/admin-llm-cache"
+  from = "/api/*"
+  to   = "/.netlify/functions/:splat"
   status = 200
 
 [[redirects]]
