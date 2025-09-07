@@ -19,7 +19,7 @@ export { prisma }
 const MAX_RUN_MS = Number(process.env.MAX_RUN_MS || 12 * 60 * 1000)
 const FLUSH_EVERY_ROWS = Number(process.env.FLUSH_EVERY_ROWS || 50)
 const FLUSH_EVERY_MS = Number(process.env.FLUSH_EVERY_MS || 5000)
-const PRIMARY_MODEL = process.env.OPENAI_API_MODEL || 'gpt-4o-mini'
+const PRIMARY_MODEL = process.env.OPENAI_API_MODEL || 'gpt-4.1'
 const MODEL_FALLBACKS = [PRIMARY_MODEL, 'gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini'].filter(Boolean)
 const LLM_CACHE_STORE = process.env.LLM_CACHE_STORE || 'cache'
 const LLM_CACHE_BLOB_KEY = process.env.LLM_CACHE_BLOB_KEY || 'llmcache.csv'
