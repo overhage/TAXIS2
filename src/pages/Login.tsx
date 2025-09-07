@@ -70,11 +70,6 @@ export default function Login() {
             </button>
           </div>
 
-          //  <div className="pt-2 text-center text-xs text-gray-500">
-          //    By continuing you agree to our <a href="/terms" className="underline">Terms</a> and{' '}
-          //    <a href="/privacy" className="underline">Privacy Policy</a>.
-          //  </div>
-
           <noscript>
             <div className="text-center text-sm text-gray-500">
               JavaScript is disabled. Use these links: <a className="underline" href="/api/login?provider=google">Google</a> •{' '}
