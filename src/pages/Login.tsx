@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useState } from 'react'
-import Image from 'next/image'
+
 
 export default function Login() {
   const [loading, setLoading] = useState<null | 'google' | 'github'>(null)
