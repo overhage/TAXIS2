@@ -75,7 +75,7 @@ const FLOAT_FIELDS = new Set([
   'odds_ratio','or_lower_95','or_upper_95',
   'directionality_ratio','dir_prop_a_before_b',
   'dir_lower_95','dir_upper_95',
-  'confidence_a_to_b','confidence_b_to_a'
+  'confidence_a_to_b','confidence_b_to_a', 'expected_obs'
 ])
 
 const toFloatOrNull = (v) => {
@@ -83,7 +83,7 @@ const toFloatOrNull = (v) => {
   return Number.isFinite(n) ? n : null
 }
 
-// === BEGIN INSERT: Statistical field calculations (ported from concept_ab.sql step_5) ===
+// Statistical field calculations (ported from concept_ab.sql step_5) ===
 // Computes statistical fields from the count fields in a MasterRecord-like object.
 // Accepts either camel (nA/nB) or lower (na/nb) keys.
 function computeStatisticalFields (t = {}) {
@@ -185,7 +185,7 @@ function computeStatisticalFields (t = {}) {
     confidence_b_to_a: nn(confidence_b_to_a)
   }
 }
-// === END INSERT ===
+// end statistics function
 
 
 function stablePromptKey(row) {
@@ -545,8 +545,8 @@ export default async (req) => {
       const code_b = code_b_raw
       const concept_a_name = (metaA?.concept_name || '').trim() || String(row.concept_a ?? code_a)
       const concept_b_name = (metaB?.concept_name || '').trim() || String(row.concept_b ?? code_b)
-      const system_a_eff = (metaA?.vocabulary_id || '').trim() || system_a_raw
-      const system_b_eff = (metaB?.vocabulary_id || '').trim() || system_b_raw
+      const system_a_eff = metaA ? "OMOP" : String(system_a_raw ?? "").trim()
+      const system_b_eff = metaB ? "OMOP" : String(system_b_raw ?? "").trim()
       const type_a_eff = coalesceType(metaA?.concept_class_id, type_a_raw)
       const type_b_eff = coalesceType(metaB?.concept_class_id, type_b_raw)
 
