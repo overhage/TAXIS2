@@ -1,5 +1,5 @@
 // netlify/functions/auth-callback.ts — patched to ensure cookie is set correctly
-// - Uses array Set-Cookie header (so both session + oauth_state clear are applied)
+// - Uses multiValueHeaders.Set-Cookie for multiple cookies (AWS/Netlify requirement)
 // - Robust https detection
 // - Fallback to AUTH_SECRET if SESSION_SECRET is unset
 // - Provider determined from `state` (no ?provider=)
@@ -89,15 +89,17 @@ export const handler: Handler = async (event) => {
     const { cookie } = createSessionCookie(session, secret, secure)
     const clearState = 'oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0' + (secure ? '; Secure' : '')
 
+    // Netlify/AWS Lambda requires multiValueHeaders for multiple Set-Cookie values
     return {
       statusCode: 302,
       headers: {
         Location: '/dashboard',
-        // IMPORTANT: Use an array so both cookies are set correctly
-        'Set-Cookie': [cookie, clearState] as unknown as any,
         'Cache-Control': 'no-store'
+      },
+      multiValueHeaders: {
+        'Set-Cookie': [cookie, clearState]
       }
-    }
+    } as any
   } catch (e: any) {
     console.error('[auth-callback] error', e)
     return { statusCode: 500, body: `Auth failed: ${e?.message || e}` }
