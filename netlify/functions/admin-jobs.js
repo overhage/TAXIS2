@@ -52,8 +52,8 @@ async function buildWhere({ date, status, user }) {
 -------------------------------- */
 export default async (req) => {
   try {
-    const gate = await requireAdmin(req)
-    if (!gate.allowed) return gate.forbidden()
+    const me = requireAdmin(event);
+    if (!me) return { statusCode: 403, body: 'forbidden' };
 
     const url = new URL(req.url)
     const method = req.method.toUpperCase()

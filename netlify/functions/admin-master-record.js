@@ -17,8 +17,8 @@ function json(body, status = 200) {
 
 export default async (req) => {
   try {
-    const gate = await requireAdmin(req)
-    if (!gate.allowed) return json({ error: 'You do not have admin access' }, 403)
+    const me = requireAdmin(event);
+    if (!me) return { statusCode: 403, body: 'forbidden' };
 
     const url = new URL(req.url)
     const op = url.searchParams.get('op') || 'summary'

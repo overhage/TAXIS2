@@ -15,7 +15,7 @@ const Header: React.FC<HeaderProps> = ({ title }) => {
   const location = useLocation();
 
   const handleLogout = () => {
-    window.location.href = '/api/logout';
+    window.location.href = '/.netlify/functions/logout';
   };
 
   return (
