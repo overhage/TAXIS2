@@ -154,7 +154,7 @@ const fetchJobs = async () => {
         <main style={{ padding: '1rem' }}>
           {user && (
             <div style={{ marginBottom: '1rem', fontSize: '0.95rem' }}>
-              Signed in as <strong>{user?.name || user?.email || 'User'}</strong>
+              Signed in as <strong>{user.displayName || user.email || 'User'}</strong>
               {user?.email ? ` (${user.email})` : null}
             </div>
           )}

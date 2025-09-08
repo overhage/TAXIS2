@@ -1,22 +1,78 @@
-// src/session/SessionProvider.tsx
 import React, { createContext, useContext, useEffect, useState } from 'react';
-type User = { sub: string; email?: string; name?: string; provider?: 'google'|'github'; roles?: string[] };
-type SessionState = { loading: boolean; user: User | null };
 
-const Ctx = createContext<SessionState>({ loading: true, user: null });
+export type User = {
+  sub: string;
+  email?: string;
+  name?: string;
+  picture?: string;
+  roles?: string[];
+  // derived
+  displayName?: string;
+  isAdmin?: boolean;
+};
+
+type SessionState = {
+  loading: boolean;
+  user: User | null;
+  refresh: () => Promise<void>;
+};
+
+const SessionCtx = createContext<SessionState>({
+  loading: true,
+  user: null,
+  refresh: async () => {},
+});
+
+function normalize(u: any): User {
+  const roles = Array.isArray(u?.roles) ? u.roles : [];
+  const isAdmin = !!(u?.isAdmin || roles.includes('admin'));
+  const displayName = u?.name || (u?.email ? String(u.email).split('@')[0] : 'User');
+  return { ...u, roles, isAdmin, displayName };
+}
 
 export function SessionProvider({ children }: { children: React.ReactNode }) {
-  const [state, set] = useState<SessionState>({ loading: true, user: null });
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState<boolean>(true);
+
+  const refresh = async () => {
+    try {
+      // Use '/api/session' if you have the redirect in netlify.toml; otherwise use '/.netlify/functions/session'
+      const r = await fetch('/api/session', { credentials: 'include' });
+      if (r.ok) {
+        const data = await r.json();
+        setUser(data?.user ? normalize(data.user) : null);
+      } else if (r.status === 401) {
+        setUser(null);
+      } else {
+        console.error('session fetch failed', r.status);
+        setUser(null);
+      }
+    } catch (e) {
+      console.error('session fetch error', e);
+      setUser(null);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    let cancel = false;
+    let cancelled = false;
     (async () => {
-      const r = await fetch('/.netlify/functions/session', { credentials: 'include' });
-      if (cancel) return;
-      if (r.ok) set({ loading: false, user: (await r.json()).user });
-      else set({ loading: false, user: null });
+      await refresh();
+      if (cancelled) return;
     })();
-    return () => { cancel = true };
+    return () => {
+      cancelled = true;
+    };
   }, []);
-  return <Ctx.Provider value={state}>{children}</Ctx.Provider>;
+
+  return (
+    <SessionCtx.Provider value={{ loading, user, refresh }}>
+      {children}
+    </SessionCtx.Provider>
+  );
 }
-export const useSession = () => useContext(Ctx);
+
+export function useSession() {
+  return useContext(SessionCtx);
+}
