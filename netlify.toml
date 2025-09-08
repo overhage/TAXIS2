@@ -55,17 +55,17 @@
   external_node_modules = ["@prisma/client","prisma"]
   included_files = ["node_modules/.prisma/client/**"]
 
-[[edge_functions]]
-function = "auth-protect"
-path = "/dashboard"
+# [[edge_functions]]
+# function = "auth-protect"
+# path = "/dashboard"
 
-[[edge_functions]]
-function = "auth-protect"
-path = "/dashboard/*"
+# [[edge_functions]]
+# function = "auth-protect"
+# path = "/dashboard/*"
 
-[[edge_functions]]
-function = "auth-protect"
-path = "/app/*"
+# [[edge_functions]]
+# function = "auth-protect"
+# path = "/app/*"
 
 [[redirects]]
   from = "/admin-llm-cache"
