@@ -17,8 +17,12 @@ function json(body, status = 200) {
 
 export default async (req) => {
   try {
-    const me = requireAdmin(event);
-    if (!me) return { statusCode: 403, body: 'forbidden' };
+    const gate = await requireAdmin(req)
+    if (!gate.allowed) {
+      // Use the provided forbidden response for consistent JSON shape
+      return gate.forbidden()
+      }
+    const me = gate.user
 
     const url = new URL(req.url)
     const op = url.searchParams.get('op') || 'summary'
