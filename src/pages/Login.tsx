@@ -13,7 +13,7 @@ export default function Login() {
     <div className="min-h-screen bg-gray-50 flex items-center justify-center p-6">
       <div className="w-full max-w-md">
         <div className="bg-white shadow-lg rounded-2xl p-8 space-y-6 text-center">
-          <header className="space-y-3">4
+          <header className="space-y-3">
             {/* Brand mark */}
             <img
               src="/Taxis%20Owl%20Transparent.png" // file lives in /public
