@@ -1,6 +1,7 @@
 // netlify/functions/_auth/oauth.ts
 import { randomBytes } from 'node:crypto';
 
+
 export type Provider = 'google'|'github';
 
 export function makeStateCookie(): { value: string, header: string } {
@@ -22,12 +23,18 @@ export function readStateFromCookie(cookieHeader?: string) {
   return item ? item.split('=')[1] : null;
 }
 
-export function authUrl(provider: Provider) {
-  const base = process.env.APP_BASE_URL!;
+function requireEnv(name: string) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing env var ${name}`);
+  return v;
+}
+
+export function authUrl(provider: 'google'|'github') {
   if (provider === 'google') {
+    const redirect = requireEnv('GOOGLE_REDIRECT_URI');   // <— throws if missing
     const params = new URLSearchParams({
-      client_id: process.env.GOOGLE_CLIENT_ID!,
-      redirect_uri: process.env.GOOGLE_REDIRECT_URI!,
+      client_id: requireEnv('GOOGLE_CLIENT_ID'),
+      redirect_uri: redirect,
       response_type: 'code',
       scope: 'openid email profile',
       include_granted_scopes: 'true',
@@ -35,9 +42,10 @@ export function authUrl(provider: Provider) {
     });
     return `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
   } else {
+    const redirect = requireEnv('GITHUB_REDIRECT_URI');
     const params = new URLSearchParams({
-      client_id: process.env.GITHUB_CLIENT_ID!,
-      redirect_uri: process.env.GITHUB_REDIRECT_URI!,
+      client_id: requireEnv('GITHUB_CLIENT_ID'),
+      redirect_uri: redirect,
       scope: 'read:user user:email',
       allow_signup: 'true'
     });

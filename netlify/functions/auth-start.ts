@@ -12,6 +12,8 @@ export const handler: Handler = async (event) => {
   const { value: state, header } = makeStateCookie();
   url.searchParams.set('state', `${provider}:${state}`);
 
+  console.log('[auth-start] redirecting to', url.toString())
+
   return {
     statusCode: 302,
     headers: { Location: url.toString(), 'Set-Cookie': header },
