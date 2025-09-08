@@ -80,6 +80,16 @@ export const handler: Handler = async (event) => {
       roles: [] as string[]
     }
 
+    const admins = (process.env.ADMIN_EMAILS || '')
+    .split(',')
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean);
+
+    if (user.email && admins.includes(user.email.toLowerCase())) {
+      session.roles.push('admin');
+    }
+
+
     const secret = process.env.SESSION_SECRET || process.env.AUTH_SECRET
     if (!secret) {
       console.error('[auth-callback] Missing SESSION_SECRET/AUTH_SECRET')
