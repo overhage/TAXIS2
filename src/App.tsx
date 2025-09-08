@@ -36,17 +36,25 @@ function useSessionInternal(): SessionState {
   const [user, setUser] = useState<User | null>(null)
 
   const refresh = async () => {
-    try {
-      const r = await fetch('/api/session', { credentials: 'include' })
-      if (!r.ok) throw new Error('session fetch failed')
-      const data = await r.json()
-      setUser(data?.authenticated ? (data.user as User) ?? {} : null)
-    } catch {
-      setUser(null)
-    } finally {
-      setLoading(false)
+  try {
+    const r = await fetch('/api/session', { credentials: 'include' }); // or '/.netlify/functions/session'
+    if (r.ok) {
+      const data = await r.json();
+      setUser((data?.user as User) ?? null); // <- treat 200 as authenticated
+    } else if (r.status === 401) {
+      setUser(null); // unauthenticated
+    } else {
+      console.error('session fetch failed', r.status);
+      setUser(null);
     }
+  } catch (err) {
+    console.error('session fetch error', err);
+    setUser(null);
+  } finally {
+    setLoading(false);
   }
+};
+
 
   useEffect(() => {
     // initial load
@@ -88,10 +96,14 @@ function RequireAuth({ children }: { children: JSX.Element }) {
 }
 
 function RequireAdmin({ children }: { children: JSX.Element }) {
-  const { loading, user } = useSession()
-  const location = useLocation()
-  if (loading) return null
-  return user && user.isAdmin ? children : <Navigate to="/dashboard" state={{ from: location }} replace />
+  const { loading, user } = useSession();
+  const location = useLocation();
+  if (loading) return null;
+
+  const isAdmin =
+    !!(user?.isAdmin || (user as any)?.roles?.includes?.('admin'));
+
+  return isAdmin ? children : <Navigate to="/dashboard" state={{ from: location }} replace />;
 }
 
 // ----------------------------------------------------------------------------
