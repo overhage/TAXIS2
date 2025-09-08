@@ -57,6 +57,10 @@
 
 [[edge_functions]]
 function = "auth-protect"
+path = "/dashboard"
+
+[[edge_functions]]
+function = "auth-protect"
 path = "/dashboard/*"
 
 [[edge_functions]]
