@@ -21,7 +21,7 @@ function getExt (filename, mime) {
 
 // --- AUTH: signed cookie → ensure DB user exists so we have user.id ---
 async function requireUser (req) {
-  const secret = process.env.SESSION_SECRET
+  const secret = process.env.SESSION_SECRET || process.env.AUTH_SECRET
   if (!secret) return null
 
   const cookieHeader = req.headers.get('cookie') || ''

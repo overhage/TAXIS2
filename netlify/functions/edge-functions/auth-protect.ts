@@ -56,10 +56,12 @@ async function readSessionFromCookie(cookieHeader: string | null, secret: string
 /** ---- edge entry ---- **/
 export default async (request: Request, context: any) => {
   // Prefer context.env (Edge standard). Fallback to Netlify global if present.
-  const secret =
-    context?.env?.SESSION_SECRET ??
-    (globalThis as any)?.Netlify?.env?.get?.('SESSION_SECRET') ??
-    '';
+const secret =
+  context?.env?.SESSION_SECRET ??
+  context?.env?.AUTH_SECRET ??
+  (globalThis as any)?.Netlify?.env?.get?.('SESSION_SECRET') ??
+  (globalThis as any)?.Netlify?.env?.get?.('AUTH_SECRET') ??
+  '';
 
   // If misconfigured, let traffic pass so you can fix env without locking out the app.
   if (!secret) return;
