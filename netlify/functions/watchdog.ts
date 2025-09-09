@@ -12,7 +12,7 @@ export const handler = schedule('* * * * *', async () => {
       status: 'running',
       OR: [{ lastHeartbeat: null }, { lastHeartbeat: { lt: cutoff } }]
     },
-    select: { id: true, cursor: true, processedRows: true }
+    select: { id: true, cursor: true, rowsProcessed: true }
   })
 
   if (!stale.length) return { statusCode: 200, body: 'ok' }
@@ -22,7 +22,7 @@ export const handler = schedule('* * * * *', async () => {
       where: { id: j.id },
       data: {
         status: 'queued',
-        cursor: Math.max(j.cursor ?? 0, j.processedRows ?? 0),
+        cursor: Math.max(j.cursor ?? 0, j.rowsProcessed ?? 0),
         restartedAt: new Date(),
         lockedAt: null,
         lockedBy: null

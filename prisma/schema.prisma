@@ -53,10 +53,8 @@ model Upload {
 
 model Job {
   id            String    @id @default(cuid())
-
   uploadId      String
   upload        Upload    @relation(fields: [uploadId], references: [id])
-
   status        JobStatus @default(queued)
   error         String?
   rowsTotal     Int?
@@ -74,7 +72,6 @@ model Job {
   startedAt     DateTime?
   updatedAt      DateTime @updatedAt  // <— ensure this exists
   finishedAt    DateTime?
-
   // Relation to User (field name kept as `User` to match existing code)
   userId        String?
   User          User?     @relation(fields: [userId], references: [id])
