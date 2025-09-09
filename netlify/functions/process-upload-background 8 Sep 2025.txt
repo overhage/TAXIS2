@@ -16,9 +16,7 @@ if (!globalThis.__prisma) {
 export { prisma }
 
 // ===== Configs =====
-// >>> BEGIN MODIFIED: increase default run budget to yield before Netlify's 15-min cap
-const MAX_RUN_MS = Number(process.env.MAX_RUN_MS || 13.5 * 60 * 1000)
-// <<< END MODIFIED
+const MAX_RUN_MS = Number(process.env.MAX_RUN_MS || 12 * 60 * 1000)
 const FLUSH_EVERY_ROWS = Number(process.env.FLUSH_EVERY_ROWS || 50)
 const FLUSH_EVERY_MS = Number(process.env.FLUSH_EVERY_MS || 5000)
 const PRIMARY_MODEL = process.env.OPENAI_API_MODEL || 'gpt-4-turbo'
@@ -482,25 +480,11 @@ export default async (req) => {
     const { jobId } = await req.json()
     if (!jobId) return new Response(JSON.stringify({ error: 'Missing jobId' }), { status: 400, headers: { 'content-type': 'application/json' } })
 
-    // >>> BEGIN ADDED: initialize run start and heartbeat helper
-    const RUN_STARTED_AT = Date.now()
-    let __lastBeat = 0
-    const __beat = async (processedCount) => {
-      const now = Date.now()
-      if (now - __lastBeat >= 20_000) {
-        await prisma.job.update({ where: { id: jobId }, data: { rowsProcessed: processedCount, lastHeartbeat: new Date() } })
-        __lastBeat = now
-      }
-    }
-    // <<< END ADDED
-
     const job = await prisma.job.findUnique({ where: { id: jobId } })
     if (!job) return new Response(JSON.stringify({ error: 'Job not found' }), { status: 404, headers: { 'content-type': 'application/json' } })
     if (job.status === 'completed' || job.status === 'failed') return new Response(JSON.stringify({ ok: true, status: job.status }), { status: 202, headers: { 'content-type': 'application/json' } })
 
-    // >>> BEGIN MODIFIED: mark running and kick off heartbeat timestamp
-    await prisma.job.update({ where: { id: jobId }, data: { status: 'running', startedAt: job.startedAt ?? new Date(), lastHeartbeat: new Date() } })
-    // <<< END MODIFIED
+    await prisma.job.update({ where: { id: jobId }, data: { status: 'running', startedAt: job.startedAt ?? new Date() } })
 
     const upload = await prisma.upload.findUnique({ where: { id: job.uploadId } })
     if (!upload) throw new Error('Upload record not found')
@@ -522,9 +506,7 @@ export default async (req) => {
 
     let offset = job.rowsProcessed || 0
     if (offset >= rowsTotal) {
-      // >>> BEGIN MODIFIED: include lastHeartbeat on completion short-circuit
-      await prisma.job.update({ where: { id: jobId }, data: { status: 'completed', finishedAt: new Date(), lastHeartbeat: new Date() } })
-      // <<< END MODIFIED
+      await prisma.job.update({ where: { id: jobId }, data: { status: 'completed', finishedAt: new Date() } })
       return new Response(JSON.stringify({ ok: true, status: 'completed' }), { status: 202, headers: { 'content-type': 'application/json' } })
     }
 
@@ -746,12 +728,6 @@ export default async (req) => {
       const timeUp = now - start > MAX_RUN_MS - 15_000
       const needFlush = processedThisRun % FLUSH_EVERY_ROWS === 0 || now - lastFlush > FLUSH_EVERY_MS || timeUp
 
-      // >>> BEGIN ADDED: periodic heartbeat while looping
-      if ((offset + 1) % 25 === 0) {
-        await __beat(offset + 1)
-      }
-      // <<< END ADDED
-
       if (needFlush) {
         await outputsStore.set(outputBlobKey, mainCsvText, { contentType: 'text/csv' })
         if (llmCacheBatch.length > 0) {
@@ -762,9 +738,7 @@ export default async (req) => {
           await cacheStore.set(LLM_CACHE_BLOB_KEY, llmCacheText, { contentType: 'text/csv' })
           llmCacheBatch.length = 0
         }
-        // >>> BEGIN MODIFIED: include heartbeat on progress flush
-        await prisma.job.update({ where: { id: jobId }, data: { rowsProcessed: offset + 1, outputBlobKey, lastHeartbeat: new Date() } })
-        // <<< END MODIFIED
+        await prisma.job.update({ where: { id: jobId }, data: { rowsProcessed: offset + 1, outputBlobKey } })
         lastFlush = now
       }
 
@@ -819,21 +793,12 @@ if (llmCacheBatch.length) {
       for (const cacheRow of llmCacheBatch) cacheText2 += rowToCsvLine(cacheRow, headers) + '\n'
       await cacheStore2.set(LLM_CACHE_BLOB_KEY, cacheText2, { contentType: 'text/csv' })
     }
-
-    // >>> BEGIN MODIFIED: final progress + heartbeat before deciding next action
-    await prisma.job.update({ where: { id: jobId }, data: { rowsProcessed: offset, outputBlobKey, lastHeartbeat: new Date() } })
-    // <<< END MODIFIED
+    await prisma.job.update({ where: { id: jobId }, data: { rowsProcessed: offset, outputBlobKey } })
 
     if (offset >= rowsTotal) {
-      // >>> BEGIN MODIFIED: include heartbeat on completion
-      await prisma.job.update({ where: { id: jobId }, data: { status: 'completed', finishedAt: new Date(), lastHeartbeat: new Date() } })
-      // <<< END MODIFIED
+      await prisma.job.update({ where: { id: jobId }, data: { status: 'completed', finishedAt: new Date() } })
       return new Response(JSON.stringify({ ok: true, status: 'completed' }), { status: 202, headers: { 'content-type': 'application/json' } })
     }
-
-    // >>> BEGIN ADDED: set status back to queued before self-chaining so watchdog/UI know it's resumable
-    await prisma.job.update({ where: { id: jobId }, data: { status: 'queued', lastHeartbeat: new Date() } })
-    // <<< END ADDED
 
     // re‑invoke to continue
     try {
@@ -850,12 +815,6 @@ if (llmCacheBatch.length) {
     return new Response(JSON.stringify({ ok: true, status: 'running' }), { status: 202, headers: { 'content-type': 'application/json' } })
   } catch (err) {
     console.error('[process-upload-background] ERROR', err)
-    // >>> BEGIN ADDED: mark job failed and heartbeat on error
-    try {
-      const body = typeof err?.message === 'string' ? err.message : String(err)
-      await prisma.job.update({ where: { id: (await (async()=>{try{const b=await req.json();return b?.jobId}catch{return null}})()) || '' } , data: { status: 'failed', lastHeartbeat: new Date(), error: body?.slice?.(0, 2000) || '' } })
-    } catch {}
-    // <<< END ADDED
     return new Response(JSON.stringify({ error: String(err?.message ?? err) }), { status: 500, headers: { 'content-type': 'application/json' } })
   }
 }

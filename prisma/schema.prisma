@@ -61,20 +61,24 @@ model Job {
   error         String?
   rowsTotal     Int?
   rowsProcessed Int?
+  cursor         Int      @default(0)  
   outputBlobKey String?
   tokensIn      Int?
   tokensOut     Int?
   costCents     Int?
-
+  lastHeartbeat  DateTime?          // <— add
+  restartedAt    DateTime?
+  lockedAt       DateTime?
+  lockedBy       String?
   createdAt     DateTime  @default(now())
   startedAt     DateTime?
+  updatedAt      DateTime @updatedAt  // <— ensure this exists
   finishedAt    DateTime?
 
   // Relation to User (field name kept as `User` to match existing code)
   userId        String?
   User          User?     @relation(fields: [userId], references: [id])
 }
-
 
 
 model OmopCdmConcept {
