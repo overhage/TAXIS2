@@ -63,7 +63,8 @@ const normalizeOptionalType = (v) => {
 }
 const numOrZero = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0 }
 const makePairId = ({ system_a, code_a, system_b, code_b }) => [system_a, code_a, system_b, code_b].map(x => String(x ?? '').trim().toUpperCase()).join('|')
-
+const nullIfEmpty = (v) => (typeof v === 'string' && v.trim() === '' ? null : v);
+const trunc255 = (v) => (typeof v === 'string' ? v.slice(0, 255) : v);
 // Fields that are Ints in Prisma (all lower-case for matching)
 const INT_FIELDS = new Set([
   'cooc_obs','cooc_event_count','a_before_b','same_day','b_before_a',
@@ -600,23 +601,33 @@ export default async (req) => {
 
         // Base create data (authoritative from OMOP for identity fields)
         const baseCreate = {
-          pairId,
-          concept_a: concept_a_name,
-          code_a,
-          concept_b: concept_b_name,
-          code_b,
-          system_a: system_a_eff,
-          system_b: system_b_eff,
-          type_a: typeof type_a_eff === 'string' ? type_a_eff : null,
-          type_b: typeof type_b_eff === 'string' ? type_b_eff : null,
-          relationshipType: relType,
-          relationshipCode: Number(relCode),
-          rational: rationalText,
-          llm_name: 'OpenAI Chat Completions',
-          llm_version: usedModel || PRIMARY_MODEL,
-          llm_date: new Date(),
-          source_count: 1
-        }
+        pairId,
+        // truncate long names, and store empty strings as nulls
+        concept_a: trunc255(nullIfEmpty(concept_a_name)),
+        code_a: nullIfEmpty(code_a),
+        concept_b: trunc255(nullIfEmpty(concept_b_name)),
+        code_b: nullIfEmpty(code_b),
+
+
+        system_a: nullIfEmpty(system_a_eff),
+        system_b: nullIfEmpty(system_b_eff),
+
+
+        // keep prior semantics (only strings allowed); now also convert empty strings to null
+        type_a: nullIfEmpty(typeof type_a_eff === 'string' ? type_a_eff : null),
+        type_b: nullIfEmpty(typeof type_b_eff === 'string' ? type_b_eff : null),
+
+
+        relationshipType: nullIfEmpty(relType),
+        relationshipCode: Number(relCode),
+        rational: nullIfEmpty(rationalText),
+
+
+        llm_name: 'OpenAI',
+        llm_version: usedModel || PRIMARY_MODEL,
+        llm_date: new Date(),
+        source_count: 1,
+        };
 
         // Copy mapped fields (guard identity/LLM fields to avoid clobbering OMOP-derived fields)
         const mappedCreate = fieldMap.length ? buildCreateDataFromRow(row, fieldMap) : {}
@@ -642,7 +653,7 @@ export default async (req) => {
         const statsCreate = computeStatisticalFields(tempCreate)
         const createData = coerceTypesInPlace({ ...tempCreate, ...statsCreate })
 
-
+        // debugging log statements
         console.log('[dbg] mappedCreate keys', Object.keys(mappedCreate))
         console.log('[dbg] guarded cooc_obs typeof=', typeof guarded.cooc_obs, 'value=', guarded.cooc_obs)
         console.log('[dbg] createData cooc_obs typeof=', typeof createData.cooc_obs, 'value=', createData.cooc_obs)
