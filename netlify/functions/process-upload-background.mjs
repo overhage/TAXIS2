@@ -63,8 +63,40 @@ const normalizeOptionalType = (v) => {
 }
 const numOrZero = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0 }
 const makePairId = ({ system_a, code_a, system_b, code_b }) => [system_a, code_a, system_b, code_b].map(x => String(x ?? '').trim().toUpperCase()).join('|')
-const nullIfEmpty = (v) => (typeof v === 'string' && v.trim() === '' ? null : v);
-const trunc255 = (v) => (typeof v === 'string' ? v.slice(0, 255) : v);
+
+function nullIfEmptyString(v) {
+  if (typeof v !== 'string') return v; // leave non-strings alone
+  const s = v.trim();
+  return s === '' ? null : s;
+}
+
+function fit(v, max) {
+  const s = nullIfEmptyString(v);
+  if (s == null || typeof s !== 'string') return s;
+  return max && s.length > max ? s.slice(0, max) : s;
+}
+
+function sanitizeForMasterRecord(input) {
+  const out = { ...input };
+
+  // apply truncation/nulling to every constrained string field
+  Object.entries(MAX).forEach(([key, max]) => {
+    out[key] = fit(out[key], max);
+  });
+
+  // pairId isn't varchar-limited in schema; still trim if string
+  if (typeof out.pairId === 'string') out.pairId = out.pairId.trim();
+
+  // optional: log truncations to help track P2000 sources
+  Object.entries(MAX).forEach(([k, max]) => {
+    const raw = input[k];
+    if (typeof raw === 'string' && raw.trim().length > max) {
+      console.warn(`[sanitize] Truncated ${k} from ${raw.trim().length} to ${max}`);
+    }
+  });
+
+  return out;
+}
 // Fields that are Ints in Prisma (all lower-case for matching)
 const INT_FIELDS = new Set([
   'cooc_obs','cooc_event_count','a_before_b','same_day','b_before_a',
@@ -80,6 +112,22 @@ const FLOAT_FIELDS = new Set([
   'dir_lower_95','dir_upper_95',
   'confidence_a_to_b','confidence_b_to_a', 'expected_obs'
 ])
+
+const MAX: Record<string, number> = {
+  concept_a: 255,
+  code_a: 20,
+  concept_b: 255,
+  code_b: 20,
+  system_a: 12,
+  system_b: 12,
+  type_a: 20,
+  type_b: 20,
+  relationshipType: 64,
+  llm_name: 100,
+  llm_version: 50,
+  human_comment: 255,
+  status: 12,
+};
 
 const toFloatOrNull = (v) => {
   const n = Number(v)
@@ -600,34 +648,28 @@ export default async (req) => {
         }
 
         // Base create data (authoritative from OMOP for identity fields)
-        const baseCreate = {
-        pairId,
-        // truncate long names, and store empty strings as nulls
-        concept_a: trunc255(nullIfEmpty(concept_a_name)),
-        code_a: nullIfEmpty(code_a),
-        concept_b: trunc255(nullIfEmpty(concept_b_name)),
-        code_b: nullIfEmpty(code_b),
-
-
-        system_a: nullIfEmpty(system_a_eff),
-        system_b: nullIfEmpty(system_b_eff),
-
-
-        // keep prior semantics (only strings allowed); now also convert empty strings to null
-        type_a: nullIfEmpty(typeof type_a_eff === 'string' ? type_a_eff : null),
-        type_b: nullIfEmpty(typeof type_b_eff === 'string' ? type_b_eff : null),
-
-
-        relationshipType: nullIfEmpty(relType),
-        relationshipCode: Number(relCode),
-        rational: nullIfEmpty(rationalText),
-
-
-        llm_name: 'OpenAI',
-        llm_version: usedModel || PRIMARY_MODEL,
-        llm_date: new Date(),
-        source_count: 1,
+        const baseCreateRaw = {
+          pairId,
+          concept_a: concept_a_name,
+          code_a,
+          concept_b: concept_b_name,
+          code_b,
+          system_a: system_a_eff,
+          system_b: system_b_eff,
+          // keep your earlier guards for non-string types:
+          type_a: typeof type_a_eff === 'string' ? type_a_eff : null,
+          type_b: typeof type_b_eff === 'string' ? type_b_eff : null,
+          relationshipType: relType,
+          relationshipCode: Number(relCode),
+          rational: rationalText,
+          llm_name: 'OpenAI',
+          llm_version: usedModel || PRIMARY_MODEL,
+          llm_date: new Date(),
+          source_count: 1,
         };
+
+        // Sanitize just before persisting:
+        const baseCreate = sanitizeForMasterRecord(baseCreateRaw);
 
         // Copy mapped fields (guard identity/LLM fields to avoid clobbering OMOP-derived fields)
         const mappedCreate = fieldMap.length ? buildCreateDataFromRow(row, fieldMap) : {}
@@ -653,15 +695,7 @@ export default async (req) => {
         const statsCreate = computeStatisticalFields(tempCreate)
         const createData = coerceTypesInPlace({ ...tempCreate, ...statsCreate })
 
-        // debugging log statements
-        console.log('[dbg] mappedCreate keys', Object.keys(mappedCreate))
-        console.log('[dbg] guarded cooc_obs typeof=', typeof guarded.cooc_obs, 'value=', guarded.cooc_obs)
-        console.log('[dbg] createData cooc_obs typeof=', typeof createData.cooc_obs, 'value=', createData.cooc_obs)
-
         await prisma.masterRecord.create({ data: createData })
-
-        // previous verison, can revert and delete the const createData once debugged
-        // await prisma.masterRecord.create({ data: coerceTypesInPlace({ ...baseCreate, ...guarded }) })
 
         // LLM cache line
       if (shouldLLM) {

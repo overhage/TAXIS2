@@ -192,7 +192,7 @@ model MasterRecord {
   /// Normalized numeric code for the relationship type above.
   relationshipCode Int
   /// Free-text rationale/notes for this relationship (field name kept as `rational`).
-  rational         String @db.VarChar(1024)
+  rational         String?
 
   /// Number of distinct source datasets/pipelines contributing evidence for this record.
   source_count Int
@@ -205,9 +205,9 @@ model MasterRecord {
   /// Timestamp when a human review was performed (if any).
   human_date   DateTime?
   /// Reviewer name/email/identifier for human validation (if any).
-  human_reviewer String?  @db.VarChar(254)
+  human_reviewer String?  @db.VarChar(255)
   /// Reviewer comment/notes (if any).
-  human_comment  String?  @db.VarChar(255)
+  human_comment  String?
   /// Workflow status for this record (e.g., proposed, accepted, rejected).
   status         String?  @db.VarChar(12)
 
