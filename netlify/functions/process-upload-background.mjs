@@ -65,7 +65,7 @@ const numOrZero = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 
 const makePairId = ({ system_a, code_a, system_b, code_b }) => [system_a, code_a, system_b, code_b].map(x => String(x ?? '').trim().toUpperCase()).join('|')
 
 function nullIfEmptyString(v) {
-  if (typeof v !== 'string') return v; // leave non-strings alone
+  if (typeof v !== 'string') return v;
   const s = v.trim();
   return s === '' ? null : s;
 }
@@ -78,25 +78,21 @@ function fit(v, max) {
 
 function sanitizeForMasterRecord(input) {
   const out = { ...input };
-
-  // apply truncation/nulling to every constrained string field
   Object.entries(MAX).forEach(([key, max]) => {
     out[key] = fit(out[key], max);
   });
-
-  // pairId isn't varchar-limited in schema; still trim if string
   if (typeof out.pairId === 'string') out.pairId = out.pairId.trim();
 
-  // optional: log truncations to help track P2000 sources
+  // optional: log truncations
   Object.entries(MAX).forEach(([k, max]) => {
     const raw = input[k];
     if (typeof raw === 'string' && raw.trim().length > max) {
       console.warn(`[sanitize] Truncated ${k} from ${raw.trim().length} to ${max}`);
     }
   });
-
   return out;
 }
+
 // Fields that are Ints in Prisma (all lower-case for matching)
 const INT_FIELDS = new Set([
   'cooc_obs','cooc_event_count','a_before_b','same_day','b_before_a',
@@ -113,7 +109,7 @@ const FLOAT_FIELDS = new Set([
   'confidence_a_to_b','confidence_b_to_a', 'expected_obs'
 ])
 
-const MAX: Record<string, number> = {
+const MAX = {
   concept_a: 255,
   code_a: 20,
   concept_b: 255,
@@ -125,7 +121,7 @@ const MAX: Record<string, number> = {
   relationshipType: 64,
   llm_name: 100,
   llm_version: 50,
-  human_comment: 255,
+  human_reviewer: 254,
   status: 12,
 };
 
@@ -656,7 +652,6 @@ export default async (req) => {
           code_b,
           system_a: system_a_eff,
           system_b: system_b_eff,
-          // keep your earlier guards for non-string types:
           type_a: typeof type_a_eff === 'string' ? type_a_eff : null,
           type_b: typeof type_b_eff === 'string' ? type_b_eff : null,
           relationshipType: relType,
