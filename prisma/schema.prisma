@@ -117,17 +117,17 @@ model MasterRecord {
   pairId String @id
 
   /// Human-readable display/name for concept A.
-  concept_a String @db.VarChar(255)
+  concept_a String? @db.VarChar(255)
   /// Code for concept A in the coding system below.
   code_a    String @db.VarChar(20)
   /// Human-readable display/name for concept B.
-  concept_b String @db.VarChar(255)
+  concept_b String? @db.VarChar(255)
   /// Code for concept B in the coding system below.
   code_b    String @db.VarChar(20)
   /// Coding system for code_a (e.g., SNOMED, ICD10, LOINC).
-  system_a  String @db.VarChar(12)
+  system_a  String? @db.VarChar(12)
   /// Coding system for code_b (e.g., SNOMED, ICD10, LOINC).
-  system_b  String @db.VarChar(12)
+  system_b  String? @db.VarChar(12)
   /// Optional type/classification for concept A (e.g., condition, procedure).
   type_a    String? @db.VarChar(20)
   /// Optional type/classification for concept B (e.g., condition, procedure).
