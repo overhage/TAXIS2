@@ -108,15 +108,13 @@ export default async (req) => {
     // Parse just enough to validate header + row count
     let header = []
     let rowCount = 0
-
     try {
       if (ext === '.csv') {
         const text = buffer.toString('utf8')
         // arrays-of-arrays; first row is header
         const delimiter = text.includes('\t') ? '\t' : ','
         const rows = parseCsv(text, { bom: true, relax_column_count: true, skip_empty_lines: true, delimiter })
-
-        const rows = parseCsv(text, { bom: true, relax_column_count: true, skip_empty_lines: true })
+  
         if (!rows?.length) {
           return new Response(JSON.stringify({ error: 'Empty file.' }), { status: 400, headers: { 'content-type': 'application/json' } })
         }
