@@ -741,16 +741,22 @@ export default async (req) => {
           updatedAt: new Date()
         }
 
-        const totals = {
-        cooc_obs: Number(mappedUpdate.cooc_obs ?? existing.cooc_obs ?? 0),
-        nA: Number(mappedUpdate.nA ?? existing.nA ?? 0),
-        nB: Number(mappedUpdate.nB ?? existing.nB ?? 0),
-        total_persons: Number(mappedUpdate.total_persons ?? existing.total_persons ?? 0),
-        a_before_b: Number(mappedUpdate.a_before_b ?? existing.a_before_b ?? 0),
-        b_before_a: Number(mappedUpdate.b_before_a ?? existing.b_before_a ?? 0),
-        cooc_event_count: Number(mappedUpdate.cooc_event_count ?? existing.cooc_event_count ?? 0),
-        same_day: Number(mappedUpdate.same_day ?? existing.same_day ?? 0)
+        const getNum = (...vals) => {
+          for (const v of vals) if (v !== undefined && v !== null) return Number(v) || 0
+          return 0
         }
+        const totals = {
+          cooc_obs:        getNum(mappedUpdate.cooc_obs,        existing.cooc_obs),
+          // accept both lower and camel for safety
+          nA:               getNum(mappedUpdate.na,  mappedUpdate.nA,  existing.na,  existing.nA),
+          nB:               getNum(mappedUpdate.nb,  mappedUpdate.nB,  existing.nb,  existing.nB),
+          total_persons:    getNum(mappedUpdate.total_persons,  existing.total_persons),
+          a_before_b:       getNum(mappedUpdate.a_before_b,     existing.a_before_b),
+          b_before_a:       getNum(mappedUpdate.b_before_a,     existing.b_before_a),
+          cooc_event_count: getNum(mappedUpdate.cooc_event_count, existing.cooc_event_count),
+          same_day:         getNum(mappedUpdate.same_day,       existing.same_day),
+        }
+
         const statsUpdate = computeStatisticalFields(totals)
         mappedUpdate = { ...mappedUpdate, ...statsUpdate }
 
