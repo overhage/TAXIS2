@@ -1,8 +1,8 @@
 Upload Spreadsheet Column,Prisma Master Field,Category
 cooc_obs,cooc_obs,Count
 cooc_event_count,cooc_event_count,Count
-na,na,Count
-nb,nb,Count
+na,nA,Count
+nb,nB,Count
 total_persons,total_persons,Count
 a_before_b,a_before_b,Count
 same_day,same_day,Count
