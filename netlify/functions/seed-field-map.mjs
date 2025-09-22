@@ -1,7 +1,6 @@
 import { getStore } from '@netlify/blobs'
 
-export default async () => {
-  const csv = `Upload Spreadsheet Column,Prisma Master Field,Category
+const csv = `Upload Spreadsheet Column,Prisma Master Field,Category
 cooc_obs,cooc_obs,Count
 cooc_event_count,cooc_event_count,Count
 na,na,Count
@@ -29,6 +28,11 @@ dir_upper_95,dir_upper_95,Stat
 confidence_a_to_b,confidence_a_to_b,Stat
 confidence_b_to_a,confidence_b_to_a,Stat`;
 
-  await getStore('config').set('MasterRecord Fields.csv', csv, { contentType: 'text/csv' });
-  return new Response('ok', { status: 200 });
+export default async (req) => {
+  // write to both common keys, just in case
+  const store = getStore(process.env.CONFIG_STORE || 'config');
+  await store.set('MasterRecord Fields.csv', csv, { contentType: 'text/csv' });
+  await store.set('masterrecord_fields.csv', csv, { contentType: 'text/csv' });
+  return new Response('ok', { status: 200, headers: { 'content-type': 'text/plain' } });
 }
+
