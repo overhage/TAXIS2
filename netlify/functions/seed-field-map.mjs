@@ -1,10 +1,11 @@
 import { getStore } from '@netlify/blobs'
+import { createHash } from 'node:crypto'
 
 const csv = `Upload Spreadsheet Column,Prisma Master Field,Category
 cooc_obs,cooc_obs,Count
 cooc_event_count,cooc_event_count,Count
-na,na,Count
-nb,nb,Count
+na,nA,Count
+nb,nB,Count
 total_persons,total_persons,Count
 a_before_b,a_before_b,Count
 same_day,same_day,Count
@@ -26,13 +27,34 @@ dir_prop_a_before_b,dir_prop_a_before_b,Stat
 dir_lower_95,dir_lower_95,Stat
 dir_upper_95,dir_upper_95,Stat
 confidence_a_to_b,confidence_a_to_b,Stat
-confidence_b_to_a,confidence_b_to_a,Stat`;
+confidence_b_to_a,confidence_b_to_a,Stat
+`;
 
-export default async (req) => {
-  // write to both common keys, just in case
-  const store = getStore(process.env.CONFIG_STORE || 'config');
-  await store.set('MasterRecord Fields.csv', csv, { contentType: 'text/csv' });
-  await store.set('masterrecord_fields.csv', csv, { contentType: 'text/csv' });
-  return new Response('ok', { status: 200, headers: { 'content-type': 'text/plain' } });
+export default async () => {
+  const storeName = process.env.CONFIG_STORE || 'config';
+  const store = getStore(storeName);
+
+  const keys = ['MasterRecord Fields.csv', 'masterrecord_fields.csv'];
+
+  // Delete old keys (idempotent)
+  for (const k of keys) {
+    try { await store.delete(k) } catch {}
+  }
+
+  // Write both variants
+  for (const k of keys) {
+    await store.set(k, csv, { contentType: 'text/csv' });
+  }
+
+  // Read back the canonical key to verify
+  const buf = await store.get(keys[0], { type: 'arrayBuffer' });
+  const text = Buffer.from(buf).toString('utf-8');
+  const sha = createHash('sha256').update(text).digest('hex');
+
+  return new Response(
+    `ok store=${storeName} key="${keys[0]}" bytes=${text.length} sha256=${sha.slice(0,16)}`,
+    { status: 200, headers: { 'content-type': 'text/plain' } }
+  );
 }
+
 
