@@ -1,60 +1,61 @@
+// netlify/functions/seed-field-map.mjs
 import { getStore } from '@netlify/blobs'
-import { createHash } from 'node:crypto'
 
-const csv = `Upload Spreadsheet Column,Prisma Master Field,Category
-cooc_obs,cooc_obs,Count
-cooc_event_count,cooc_event_count,Count
-na,nA,Count
-nb,nB,Count
-total_persons,total_persons,Count
-a_before_b,a_before_b,Count
-same_day,same_day,Count
-b_before_a,b_before_a,Count
-expected_obs,expected_obs,Stat
-lift,lift,Stat
-lift_lower_95,lift_lower_95,Stat
-lift_upper_95,lift_upper_95,Stat
-z_score,z_score,Stat
-ab_h,ab_h,Stat
-a_only_h,a_only_h,Stat
-b_only_h,b_only_h,Stat
-neither_h,neither_h,Stat
-odds_ratio,odds_ratio,Stat
-or_lower_95,or_lower_95,Stat
-or_upper_95,or_upper_95,Stat
-directionality_ratio,directionality_ratio,Stat
-dir_prop_a_before_b,dir_prop_a_before_b,Stat
-dir_lower_95,dir_lower_95,Stat
-dir_upper_95,dir_upper_95,Stat
-confidence_a_to_b,confidence_a_to_b,Stat
-confidence_b_to_a,confidence_b_to_a,Stat
-`;
+const CONFIG_STORE = process.env.CONFIG_STORE || 'config'
 
-export default async () => {
-  const storeName = process.env.CONFIG_STORE || 'config';
-  const store = getStore(storeName);
+// Keep in sync with your reader’s candidate list
+const FIELD_MAP_CANDIDATE_KEYS = [
+  'MasterRecord Fields.xlsx',
+  'MasterRecord Fields.csv',
+  'masterrecord_fields.xlsx',
+  'masterrecord_fields.csv',
+  'MasterRecordFields.xlsx',
+  'MasterRecordFields.csv'
+]
 
-  const keys = ['MasterRecord Fields.csv', 'masterrecord_fields.csv'];
+export default async (req) => {
+  try {
+    if (req.method !== 'POST') {
+      return new Response('Method Not Allowed', { status: 405 })
+    }
 
-  // Delete old keys (idempotent)
-  for (const k of keys) {
-    try { await store.delete(k) } catch {}
+    // Accept a raw CSV (recommended) or JSON body
+    const contentType = req.headers.get('content-type') || ''
+    const store = getStore(CONFIG_STORE)
+
+    // Read query flags
+    const url = new URL(req.url)
+    const key = url.searchParams.get('key') || 'MasterRecord Fields.csv'
+    const purgeOthers = url.searchParams.get('purgeOthers') === 'true'  // ← delete .xlsx and other aliases
+    const text = contentType.includes('application/json')
+      ? JSON.stringify(await req.json())
+      : await req.text()
+
+    if (!text?.trim()) {
+      return new Response(JSON.stringify({ error: 'Empty body' }), {
+        status: 400, headers: { 'content-type': 'application/json' }
+      })
+    }
+
+    // 1) Write the new map
+    await store.set(key, text, { contentType: 'text/csv; charset=utf-8' })
+
+    // 2) Optionally delete the alternates so the loader can’t pick a stale file
+    let deleted = []
+    if (purgeOthers) {
+      for (const k of FIELD_MAP_CANDIDATE_KEYS) {
+        if (k !== key) {
+          try { await store.delete(k); deleted.push(k) } catch {}
+        }
+      }
+    }
+
+    return new Response(JSON.stringify({ ok: true, wrote: key, deleted }), {
+      status: 200, headers: { 'content-type': 'application/json' }
+    })
+  } catch (e) {
+    return new Response(JSON.stringify({ error: String(e?.message || e) }), {
+      status: 500, headers: { 'content-type': 'application/json' }
+    })
   }
-
-  // Write both variants
-  for (const k of keys) {
-    await store.set(k, csv, { contentType: 'text/csv' });
-  }
-
-  // Read back the canonical key to verify
-  const buf = await store.get(keys[0], { type: 'arrayBuffer' });
-  const text = Buffer.from(buf).toString('utf-8');
-  const sha = createHash('sha256').update(text).digest('hex');
-
-  return new Response(
-    `ok store=${storeName} key="${keys[0]}" bytes=${text.length} sha256=${sha.slice(0,16)}`,
-    { status: 200, headers: { 'content-type': 'text/plain' } }
-  );
 }
-
-
