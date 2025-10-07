@@ -496,6 +496,48 @@ function rowToCsvLine (row, headers) {
   return headers.map((h) => esc(row[h])).join(',')
 }
 
+// Persist outputs blob
+async function persistOutputsBlob(outputsStore, outputBlobKey, mainCsvText) {
+  await outputsStore.set(outputBlobKey, mainCsvText, { contentType: 'text/csv' })
+}
+
+// Persist llm cache to blob (appends rows)
+async function persistLlmCacheBlob(cacheStore, key, llmCacheBatch, llmCacheHeaders) {
+  if (!llmCacheBatch || llmCacheBatch.length === 0) return
+  let llmCacheText = (await cacheStore.get(key, { type: 'text' })) || ''
+  const prime = ensureHeader(llmCacheText, llmCacheHeaders)
+  const headers = prime.headers; llmCacheText = prime.csvText
+  for (const cacheRow of llmCacheBatch) llmCacheText += rowToCsvLine(cacheRow, headers) + '\n'
+  await cacheStore.set(key, llmCacheText, { contentType: 'text/csv' })
+}
+
+// Persist llm cache to DB (createMany with upsert fallback)
+async function persistLlmCacheToDb(llmCacheBatch) {
+  if (!llmCacheBatch || llmCacheBatch.length === 0) return
+  const rowsForDb = llmCacheBatch.map(r => ({
+    promptKey: stablePromptKey(r),
+    result: JSON.stringify(r),
+    tokensIn: Number.isFinite(+r.prompt_tokens) ? +r.prompt_tokens : null,
+    tokensOut: Number.isFinite(+r.completion_tokens) ? +r.completion_tokens : null,
+    model: r.model ?? null
+  }))
+  try {
+    await prisma.llmCache.createMany({ data: rowsForDb, skipDuplicates: true })
+  } catch (e) {
+    for (const d of rowsForDb) {
+      try {
+        await prisma.llmCache.upsert({
+          where: { promptKey: d.promptKey },
+          create: d,
+          update: { result: d.result, tokensIn: d.tokensIn, tokensOut: d.tokensOut, model: d.model }
+        })
+      } catch (e2) {
+        console.warn('[llmcache.upsert] failed', e2?.message || e2)
+      }
+    }
+  }
+}
+
 function ensureHeader (existingCsvText, headersFromSample) {
   if (existingCsvText && existingCsvText.length > 0) {
     const firstNl = existingCsvText.indexOf('\n')
@@ -521,13 +563,179 @@ function coerceTypesInPlace(obj) {
   return obj
 }
 
+// Find master record by pairId with fallback
+async function findMasterByPairId(pairId) {
+  try { return await prisma.masterRecord.findUnique({ where: { pairId } }) } catch (e) {
+    try { return await prisma.masterRecord.findFirst({ where: { pairId } }) } catch { return null }
+  }
+}
+
+// Handle creating a new masterRecord from a row
+async function handleNewRecord({ row, pairId, concept_a_name, concept_b_name, code_a, code_b, system_a_eff, system_b_eff, type_a_eff, type_b_eff, relCode, relType, rationalText, usedModel, fieldMap, job }) {
+  const baseCreateRaw = {
+    pairId,
+    concept_a: concept_a_name,
+    code_a,
+    concept_b: concept_b_name,
+    code_b,
+    system_a: system_a_eff,
+    system_b: system_b_eff,
+    type_a: typeof type_a_eff === 'string' ? type_a_eff : null,
+    type_b: typeof type_b_eff === 'string' ? type_b_eff : null,
+    relationshipType: relType,
+    relationshipCode: Number(relCode),
+    rational: rationalText,
+    llm_name: 'OpenAI',
+    llm_version: usedModel || PRIMARY_MODEL,
+    llm_date: new Date(),
+    source_count: 1,
+  }
+  const baseCreate = sanitizeForMasterRecord(baseCreateRaw)
+  const mappedCreate = fieldMap.length ? buildCreateDataFromRow(row, fieldMap) : {}
+  const BLOCK = new Set(['pairId','relationshipType','relationshipCode','rational','llm_name','llm_version','llm_date','source_count','concept_a','concept_b','system_a','system_b','type_a','type_b','code_a','code_b'])
+  const guarded = {}
+  for (const [k,v] of Object.entries(mappedCreate)) if (!BLOCK.has(k)) guarded[k] = v
+  const tempCreate = coerceTypesInPlace({ ...baseCreate, ...guarded })
+  const statsCreate = computeStatisticalFields(tempCreate)
+  const createData = coerceTypesInPlace({ ...tempCreate, ...statsCreate })
+  await prisma.masterRecord.create({ data: createData })
+}
+
+// Handle updating existing masterRecord
+async function handleExistingRecord({ existing, row, pairId, concept_a_name, concept_b_name, system_a_eff, system_b_eff, type_a_eff, type_b_eff, fieldMap }) {
+  let mappedUpdate = fieldMap.length ? buildUpdateDataFromRow(existing, row, fieldMap) : {
+    cooc_event_count: numOrZero(existing?.cooc_event_count) + numOrZero(row.cooc_event_count),
+    source_count: numOrZero(existing?.source_count) + 1
+  }
+  mappedUpdate = {
+    ...mappedUpdate,
+    concept_a: concept_a_name || existing.concept_a,
+    concept_b: concept_b_name || existing.concept_b,
+    system_a: system_a_eff || existing.system_a,
+    system_b: system_b_eff || existing.system_b,
+    ...(typeof type_a_eff === 'string' ? { type_a: type_a_eff } : {}),
+    ...(typeof type_b_eff === 'string' ? { type_b: type_b_eff } : {}),
+    updatedAt: new Date()
+  }
+  const getNum = (...vals) => { for (const v of vals) if (v !== undefined && v !== null) return Number(v) || 0; return 0 }
+  const totals = {
+    cooc_obs:        getNum(mappedUpdate.cooc_obs,        existing.cooc_obs),
+    nA:               getNum(mappedUpdate.na,  mappedUpdate.nA,  existing.na,  existing.nA),
+    nB:               getNum(mappedUpdate.nb,  mappedUpdate.nB,  existing.nb,  existing.nB),
+    total_persons:    getNum(mappedUpdate.total_persons,  existing.total_persons),
+    a_before_b:       getNum(mappedUpdate.a_before_b,     existing.a_before_b),
+    b_before_a:       getNum(mappedUpdate.b_before_a,     existing.b_before_a),
+    cooc_event_count: getNum(mappedUpdate.cooc_event_count, existing.cooc_event_count),
+    same_day:         getNum(mappedUpdate.same_day,       existing.same_day),
+  }
+  const statsUpdate = computeStatisticalFields(totals)
+  mappedUpdate = { ...mappedUpdate, ...statsUpdate }
+
+  await prisma.masterRecord.update({ where: existing?.id ? { id: existing.id } : { pairId }, data: coerceTypesInPlace(mappedUpdate) })
+}
+
+// Process a single row: lookup concepts, decide LLM, create/update masterRecord, return enriched row and optional llmCacheRow
+async function processRow({ row, offset, fieldMap, job }) {
+  const system_a_raw = String(row.system_a ?? '').trim()
+  const system_b_raw = String(row.system_b ?? '').trim()
+  const code_a_raw = String(row.code_a ?? row.concept_a ?? '').trim()
+  const code_b_raw = String(row.code_b ?? row.concept_b ?? '').trim()
+  const type_a_raw = row.type_a
+  const type_b_raw = row.type_b
+
+  const [metaA, metaB] = await Promise.all([ lookupConceptMeta(code_a_raw), lookupConceptMeta(code_b_raw) ])
+
+  const code_a = code_a_raw
+  const code_b = code_b_raw
+  const concept_a_name = (metaA?.concept_name || '').trim() || String(row.concept_a ?? code_a)
+  const concept_b_name = (metaB?.concept_name || '').trim() || String(row.concept_b ?? code_b)
+  const system_a_eff = metaA ? "OMOP" : String(system_a_raw ?? "").trim()
+  const system_b_eff = metaB ? "OMOP" : String(system_b_raw ?? "").trim()
+  const type_a_eff = coalesceType(metaA?.concept_class_id, type_a_raw)
+  const type_b_eff = coalesceType(metaB?.concept_class_id, type_b_raw)
+
+  const pairId = makePairId({ system_a: system_a_eff, code_a, system_b: system_b_eff, code_b })
+
+  const existing = await findMasterByPairId(pairId)
+
+  let relCode, relType, rationalText, usedModel, usage
+  let llmCacheRow = null
+
+  if (!existing) {
+    const events_ab = pickEventsAb(row)
+    const events_ab_ae = pickEventsAe(row)
+    const liftVal = Number(row.lift)
+    const shouldLLM = Number.isFinite(liftVal) && liftVal > LIFT_MIN_FOR_LLM
+
+    if (shouldLLM) {
+      const cls = await classifyRelationship({ conceptAText: concept_a_name, conceptBText: concept_b_name, events_ab, events_ab_ae })
+      ;({ relCode, relType, rationalText, usedModel, usage } = cls)
+    } else {
+      relCode = 11
+      relType = RELATIONSHIP_TYPES[11]
+      rationalText = 'Skipped LLM: lift ≤ threshold'
+      usedModel = PRIMARY_MODEL
+      usage = {}
+    }
+
+    await handleNewRecord({ row, pairId, concept_a_name, concept_b_name, code_a, code_b, system_a_eff, system_b_eff, type_a_eff, type_b_eff, relCode, relType, rationalText, usedModel, fieldMap, job })
+
+    if (Number.isFinite(Number(row.lift)) && Number(row.lift) > LIFT_MIN_FOR_LLM) {
+      llmCacheRow = {
+        timestamp: new Date().toISOString(), jobId: job.id || jobId, uploadId: job.uploadId, userId: job.userId, rowIndex: String(offset), pairId,
+        system_a: system_a_eff, code_a, system_b: system_b_eff, code_b, concept_a_t: concept_a_name, concept_b_t: concept_b_name,
+        model: usedModel || PRIMARY_MODEL, relationship_code: String(relCode), relationship_type: relType,
+        prompt_tokens: String(usage?.prompt_tokens ?? ''), completion_tokens: String(usage?.completion_tokens ?? ''), total_tokens: String(usage?.total_tokens ?? '')
+      }
+    }
+  } else {
+    relCode = Number(existing.relationshipCode ?? 11) || 11
+    relType = String(existing.relationshipType ?? RELATIONSHIP_TYPES[11])
+    rationalText = String(existing.rational ?? '')
+    usedModel = existing.llm_version || PRIMARY_MODEL
+
+    await handleExistingRecord({ existing, row, pairId, concept_a_name, concept_b_name, system_a_eff, system_b_eff, type_a_eff, type_b_eff, fieldMap })
+  }
+
+  const enriched = {
+    ...row,
+    code_a,
+    code_b,
+    system_a: system_a_eff,
+    system_b: system_b_eff,
+    concept_a: concept_a_name,
+    concept_b: concept_b_name,
+    type_a: typeof type_a_eff === 'string' ? type_a_eff : '',
+    type_b: typeof type_b_eff === 'string' ? type_b_eff : '',
+    relationship_type: relType,
+    relationship_code: String(relCode),
+    rational: rationalText
+  }
+
+  return { enriched, llmCacheRow }
+}
+
+// Flush helper used inside loop
+async function flushIfNeeded({ now, start, processedThisRun, lastFlush, outputsStore, outputBlobKey, mainCsvTextRef, cacheStore, llmCacheBatch, llmCacheHeaders, jobId }) {
+  const timeUp = now - start > MAX_RUN_MS - 15_000
+  const needFlush = processedThisRun % FLUSH_EVERY_ROWS === 0 || now - lastFlush > FLUSH_EVERY_MS || timeUp
+  if (!needFlush) return { needFlush: false, timeUp: false }
+  await persistOutputsBlob(outputsStore, outputBlobKey, mainCsvTextRef.value)
+  if (llmCacheBatch.length > 0) {
+    await persistLlmCacheBlob(cacheStore, LLM_CACHE_BLOB_KEY, llmCacheBatch, llmCacheHeaders)
+    await persistLlmCacheToDb(llmCacheBatch)
+    llmCacheBatch.length = 0
+  }
+  await prisma.job.update({ where: { id: jobId }, data: { rowsProcessed: mainCsvTextRef.rowsProcessed, outputBlobKey, lastHeartbeat: new Date() } })
+  return { needFlush: true, timeUp }
+}
+
 export default async (req) => {
   try {
     if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405, headers: { 'content-type': 'text/plain; charset=utf-8' } })
     const { jobId } = await req.json()
     if (!jobId) return new Response(JSON.stringify({ error: 'Missing jobId' }), { status: 400, headers: { 'content-type': 'application/json' } })
 
-    // >>> BEGIN ADDED: initialize run start and heartbeat helper
     const RUN_STARTED_AT = Date.now()
     let __lastBeat = 0
     const __beat = async (processedCount) => {
@@ -537,15 +745,12 @@ export default async (req) => {
         __lastBeat = now
       }
     }
-    // <<< END ADDED
 
     const job = await prisma.job.findUnique({ where: { id: jobId } })
     if (!job) return new Response(JSON.stringify({ error: 'Job not found' }), { status: 404, headers: { 'content-type': 'application/json' } })
     if (job.status === 'completed' || job.status === 'failed') return new Response(JSON.stringify({ ok: true, status: job.status }), { status: 202, headers: { 'content-type': 'application/json' } })
 
-    // >>> BEGIN MODIFIED: mark running and kick off heartbeat timestamp
     await prisma.job.update({ where: { id: jobId }, data: { status: 'running', startedAt: job.startedAt ?? new Date(), lastHeartbeat: new Date() } })
-    // <<< END MODIFIED
 
     const upload = await prisma.upload.findUnique({ where: { id: job.uploadId } })
     if (!upload) throw new Error('Upload record not found')
@@ -558,8 +763,6 @@ export default async (req) => {
     if (!buffer) throw new Error('Uploaded blob not found')
 
     const rows = parseUploadBufferToRows(buffer, upload.originalName || upload.blobKey)
-
-    // Load field mapping once per run (may be empty)
     const fieldMap = await loadFieldMap()
 
     const rowsTotal = job.rowsTotal && job.rowsTotal > 0 ? job.rowsTotal : rows.length
@@ -567,9 +770,7 @@ export default async (req) => {
 
     let offset = job.rowsProcessed || 0
     if (offset >= rowsTotal) {
-      // >>> BEGIN MODIFIED: include lastHeartbeat on completion short-circuit
       await prisma.job.update({ where: { id: jobId }, data: { status: 'completed', finishedAt: new Date(), lastHeartbeat: new Date() } })
-      // <<< END MODIFIED
       return new Response(JSON.stringify({ ok: true, status: 'completed' }), { status: 202, headers: { 'content-type': 'application/json' } })
     }
 
@@ -577,9 +778,8 @@ export default async (req) => {
     if (!job.outputBlobKey) await prisma.job.update({ where: { id: jobId }, data: { outputBlobKey } })
 
     let mainCsvText = (await outputsStore.get(outputBlobKey, { type: 'text' })) || ''
-
     let llmCacheText = null
-    let llmCacheHeaders = ['timestamp','jobId','uploadId','userId','rowIndex','pairId','system_a','code_a','system_b','code_b','concept_a_t','concept_b_t','model','relationship_code','relationship_type','prompt_tokens','completion_tokens','total_tokens']
+    const llmCacheHeaders = ['timestamp','jobId','uploadId','userId','rowIndex','pairId','system_a','code_a','system_b','code_b','concept_a_t','concept_b_t','model','relationship_code','relationship_type','prompt_tokens','completion_tokens','total_tokens']
     const llmCacheBatch = []
 
     const start = Date.now()
@@ -587,301 +787,44 @@ export default async (req) => {
     let processedThisRun = 0
     let mainHeader = null
 
+    const mainCsvTextRef = { value: mainCsvText, rowsProcessed: 0 }
+
     for (; offset < rowsTotal; offset++) {
-      const row = rows[offset]
-      // Raw values from upload
-      const system_a_raw = String(row.system_a ?? '').trim()
-      const system_b_raw = String(row.system_b ?? '').trim()
-      const code_a_raw = String(row.code_a ?? row.concept_a ?? '').trim()
-      const code_b_raw = String(row.code_b ?? row.concept_b ?? '').trim()
-      const type_a_raw = row.type_a
-      const type_b_raw = row.type_b
-
-      // OMOP lookups by concept_id
-      const [metaA, metaB] = await Promise.all([
-        lookupConceptMeta(code_a_raw),
-        lookupConceptMeta(code_b_raw)
-      ])
-
-      // Effective values (prefer OMOP)
-      const code_a = code_a_raw
-      const code_b = code_b_raw
-      const concept_a_name = (metaA?.concept_name || '').trim() || String(row.concept_a ?? code_a)
-      const concept_b_name = (metaB?.concept_name || '').trim() || String(row.concept_b ?? code_b)
-      const system_a_eff = metaA ? "OMOP" : String(system_a_raw ?? "").trim()
-      const system_b_eff = metaB ? "OMOP" : String(system_b_raw ?? "").trim()
-      const type_a_eff = coalesceType(metaA?.concept_class_id, type_a_raw)
-      const type_b_eff = coalesceType(metaB?.concept_class_id, type_b_raw)
-
-      const pairId = makePairId({ system_a: system_a_eff, code_a, system_b: system_b_eff, code_b })
-
-      let existing = null
-      try { existing = await prisma.masterRecord.findUnique({ where: { pairId } }) } catch { existing = await prisma.masterRecord.findFirst({ where: { pairId } }) }
-
-      let relCode, relType, rationalText, usedModel, usage
-
-      if (!existing) {
-        const events_ab = pickEventsAb(row)
-        const events_ab_ae = pickEventsAe(row)
-        const liftVal = Number(row.lift)
-        const shouldLLM = Number.isFinite(liftVal) && liftVal > LIFT_MIN_FOR_LLM
-
-        if (shouldLLM) {
-          const cls = await classifyRelationship({
-            conceptAText: concept_a_name,
-            conceptBText: concept_b_name,
-            events_ab,
-            events_ab_ae
-          })
-          ;({ relCode, relType, rationalText, usedModel, usage } = cls)
-        } else {
-          // Skip LLM; default to “No clear relationship”
-          relCode = 11
-          relType = RELATIONSHIP_TYPES[11]
-          rationalText = 'Skipped LLM: lift ≤ threshold'
-          usedModel = PRIMARY_MODEL
-          usage = {}
-        }
-
-        // Base create data (authoritative from OMOP for identity fields)
-        const baseCreateRaw = {
-          pairId,
-          concept_a: concept_a_name,
-          code_a,
-          concept_b: concept_b_name,
-          code_b,
-          system_a: system_a_eff,
-          system_b: system_b_eff,
-          type_a: typeof type_a_eff === 'string' ? type_a_eff : null,
-          type_b: typeof type_b_eff === 'string' ? type_b_eff : null,
-          relationshipType: relType,
-          relationshipCode: Number(relCode),
-          rational: rationalText,
-          llm_name: 'OpenAI',
-          llm_version: usedModel || PRIMARY_MODEL,
-          llm_date: new Date(),
-          source_count: 1,
-        };
-
-        // Sanitize just before persisting:
-        const baseCreate = sanitizeForMasterRecord(baseCreateRaw);
-
-        // Copy mapped fields (guard identity/LLM fields to avoid clobbering OMOP-derived fields)
-        const mappedCreate = fieldMap.length ? buildCreateDataFromRow(row, fieldMap) : {}
-        const guarded = { ...mappedCreate }
-        delete guarded.pairId
-        delete guarded.relationshipType
-        delete guarded.relationshipCode
-        delete guarded.rational
-        delete guarded.llm_name
-        delete guarded.llm_version
-        delete guarded.llm_date
-        delete guarded.source_count
-        delete guarded.concept_a
-        delete guarded.concept_b
-        delete guarded.system_a
-        delete guarded.system_b
-        delete guarded.type_a
-        delete guarded.type_b
-        delete guarded.code_a
-        delete guarded.code_b
-
-        const tempCreate = coerceTypesInPlace({ ...baseCreate, ...guarded })
-        const statsCreate = computeStatisticalFields(tempCreate)
-        const createData = coerceTypesInPlace({ ...tempCreate, ...statsCreate })
-
-        await prisma.masterRecord.create({ data: createData })
-
-        // LLM cache line
-      if (shouldLLM) {
-        llmCacheBatch.push({
-          timestamp: new Date().toISOString(),
-          jobId,
-          uploadId: job.uploadId,
-          userId: job.userId,
-          rowIndex: String(offset),
-          pairId,
-          system_a: system_a_eff,
-          code_a,
-          system_b: system_b_eff,
-          code_b,
-          concept_a_t: concept_a_name,
-          concept_b_t: concept_b_name,
-          model: usedModel || PRIMARY_MODEL,
-          relationship_code: String(relCode),
-          relationship_type: relType,
-          prompt_tokens: String(usage?.prompt_tokens ?? ''),
-          completion_tokens: String(usage?.completion_tokens ?? ''),
-          total_tokens: String(usage?.total_tokens ?? '')
-        })
-      }
-
-      } else {
-        // Preserve previous classification fields
-        relCode = Number(existing.relationshipCode ?? 11) || 11
-        relType = String(existing.relationshipType ?? RELATIONSHIP_TYPES[11])
-        rationalText = String(existing.rational ?? '')
-        usedModel = existing.llm_version || PRIMARY_MODEL
-
-        // Mapping-driven updates (adds counts; skip stats; increments source_count)
-        let mappedUpdate = fieldMap.length ? buildUpdateDataFromRow(existing, row, fieldMap) : {
-          cooc_event_count: numOrZero(existing?.cooc_event_count) + numOrZero(row.cooc_event_count),
-          source_count: numOrZero(existing?.source_count) + 1
-        }
-
-        // Refresh concept/system/type fields from OMOP (authoritative)
-        mappedUpdate = {
-          ...mappedUpdate,
-          concept_a: concept_a_name || existing.concept_a,
-          concept_b: concept_b_name || existing.concept_b,
-          system_a: system_a_eff || existing.system_a,
-          system_b: system_b_eff || existing.system_b,
-          ...(typeof type_a_eff === 'string' ? { type_a: type_a_eff } : {}),
-          ...(typeof type_b_eff === 'string' ? { type_b: type_b_eff } : {}),
-          updatedAt: new Date()
-        }
-
-        const getNum = (...vals) => {
-          for (const v of vals) if (v !== undefined && v !== null) return Number(v) || 0
-          return 0
-        }
-        const totals = {
-          cooc_obs:        getNum(mappedUpdate.cooc_obs,        existing.cooc_obs),
-          // accept both lower and camel for safety
-          nA:               getNum(mappedUpdate.na,  mappedUpdate.nA,  existing.na,  existing.nA),
-          nB:               getNum(mappedUpdate.nb,  mappedUpdate.nB,  existing.nb,  existing.nB),
-          total_persons:    getNum(mappedUpdate.total_persons,  existing.total_persons),
-          a_before_b:       getNum(mappedUpdate.a_before_b,     existing.a_before_b),
-          b_before_a:       getNum(mappedUpdate.b_before_a,     existing.b_before_a),
-          cooc_event_count: getNum(mappedUpdate.cooc_event_count, existing.cooc_event_count),
-          same_day:         getNum(mappedUpdate.same_day,       existing.same_day),
-        }
-
-        const statsUpdate = computeStatisticalFields(totals)
-        mappedUpdate = { ...mappedUpdate, ...statsUpdate }
-
-        await prisma.masterRecord.update({
-          where: existing?.id ? { id: existing.id } : { pairId },
-          data: coerceTypesInPlace(mappedUpdate)
-        })
-      }
-
-      const enriched = {
-        ...row,
-        code_a,
-        code_b,
-        system_a: system_a_eff,
-        system_b: system_b_eff,
-        concept_a: concept_a_name,
-        concept_b: concept_b_name,
-        type_a: typeof type_a_eff === 'string' ? type_a_eff : '',
-        type_b: typeof type_b_eff === 'string' ? type_b_eff : '',
-        relationship_type: relType,
-        relationship_code: String(relCode),
-        rational: rationalText
-      }
-
+      const { enriched, llmCacheRow } = await processRow({ row: rows[offset], offset, fieldMap, job })
       if (!mainHeader) {
-        const prime = ensureHeader(mainCsvText, Object.keys(enriched))
-        mainHeader = prime.headers; mainCsvText = prime.csvText
+        const prime = ensureHeader(mainCsvTextRef.value, Object.keys(enriched))
+        mainHeader = prime.headers; mainCsvTextRef.value = prime.csvText
       }
-      mainCsvText += rowToCsvLine(enriched, mainHeader) + '\n'
+      mainCsvTextRef.value += rowToCsvLine(enriched, mainHeader) + '\n'
+
+      if (llmCacheRow) llmCacheBatch.push(llmCacheRow)
 
       processedThisRun += 1
+      mainCsvTextRef.rowsProcessed = offset + 1
       const now = Date.now()
-      const timeUp = now - start > MAX_RUN_MS - 15_000
-      const needFlush = processedThisRun % FLUSH_EVERY_ROWS === 0 || now - lastFlush > FLUSH_EVERY_MS || timeUp
 
-      // >>> BEGIN ADDED: periodic heartbeat while looping
-      if ((offset + 1) % 25 === 0) {
-        await __beat(offset + 1)
-      }
-      // <<< END ADDED
+      if ((offset + 1) % 25 === 0) await __beat(offset + 1)
 
-      if (needFlush) {
-        await outputsStore.set(outputBlobKey, mainCsvText, { contentType: 'text/csv' })
-        if (llmCacheBatch.length > 0) {
-          if (llmCacheText == null) llmCacheText = (await cacheStore.get(LLM_CACHE_BLOB_KEY, { type: 'text' })) || ''
-          const prime = ensureHeader(llmCacheText, llmCacheHeaders)
-          const headers = prime.headers; llmCacheText = prime.csvText
-          for (const cacheRow of llmCacheBatch) llmCacheText += rowToCsvLine(cacheRow, headers) + '\n'
-          await cacheStore.set(LLM_CACHE_BLOB_KEY, llmCacheText, { contentType: 'text/csv' })
-          llmCacheBatch.length = 0
-        }
-        // >>> BEGIN MODIFIED: include heartbeat on progress flush
-        await prisma.job.update({ where: { id: jobId }, data: { rowsProcessed: offset + 1, outputBlobKey, lastHeartbeat: new Date() } })
-        // <<< END MODIFIED
-        lastFlush = now
-      }
-
-if (llmCacheBatch.length) {
-  const rowsForDb = llmCacheBatch.map(r => ({
-    promptKey: stablePromptKey(r),
-    // Store the whole row so you keep everything you already capture
-    result: JSON.stringify(r),
-    tokensIn: Number.isFinite(+r.prompt_tokens) ? +r.prompt_tokens : null,
-    tokensOut: Number.isFinite(+r.completion_tokens) ? +r.completion_tokens : null,
-    model: r.model ?? null
-  }))
-
-  try {
-    // Fast path for Postgres; ignores duplicates by promptKey
-    await prisma.llmCache.createMany({ data: rowsForDb, skipDuplicates: true })
-  } catch (e) {
-    // Fallback: idempotent upserts (slower, but safe everywhere)
-    for (const d of rowsForDb) {
-      try {
-        await prisma.llmCache.upsert({
-          where: { promptKey: d.promptKey },
-          create: d,
-          update: {
-            // If you want “first write wins”, remove this update block
-            result: d.result,
-            tokensIn: d.tokensIn,
-            tokensOut: d.tokensOut,
-            model: d.model
-          }
-        })
-      } catch (e2) {
-        console.warn('[llmcache.upsert] failed', e2?.message || e2)
-      }
-    }
-  }
-
-  // Clear the in-memory batch (you already do this for the blob path)
-  llmCacheBatch.length = 0
-}
-
-
+      const { needFlush, timeUp } = await flushIfNeeded({ now, start, processedThisRun, lastFlush, outputsStore, outputBlobKey, mainCsvTextRef, cacheStore, llmCacheBatch, llmCacheHeaders, jobId })
+      if (needFlush) lastFlush = Date.now()
       if (timeUp) break
     }
 
-    await getStore('outputs').set(outputBlobKey, mainCsvText, { contentType: 'text/csv' })
+    await persistOutputsBlob(outputsStore, outputBlobKey, mainCsvTextRef.value)
     if (llmCacheBatch.length > 0) {
-      const cacheStore2 = getStore(LLM_CACHE_STORE)
-      let cacheText2 = (await cacheStore2.get(LLM_CACHE_BLOB_KEY, { type: 'text' })) || ''
-      const prime = ensureHeader(cacheText2, llmCacheHeaders)
-      const headers = prime.headers; cacheText2 = prime.csvText
-      for (const cacheRow of llmCacheBatch) cacheText2 += rowToCsvLine(cacheRow, headers) + '\n'
-      await cacheStore2.set(LLM_CACHE_BLOB_KEY, cacheText2, { contentType: 'text/csv' })
+      await persistLlmCacheBlob(cacheStore, LLM_CACHE_BLOB_KEY, llmCacheBatch, llmCacheHeaders)
+      await persistLlmCacheToDb(llmCacheBatch)
     }
 
-    // >>> BEGIN MODIFIED: final progress + heartbeat before deciding next action
-    await prisma.job.update({ where: { id: jobId }, data: { rowsProcessed: offset, outputBlobKey, lastHeartbeat: new Date() } })
-    // <<< END MODIFIED
+    await prisma.job.update({ where: { id: jobId }, data: { rowsProcessed: mainCsvTextRef.rowsProcessed, outputBlobKey, lastHeartbeat: new Date() } })
 
-    if (offset >= rowsTotal) {
-      // >>> BEGIN MODIFIED: include heartbeat on completion
+    if (mainCsvTextRef.rowsProcessed >= rowsTotal) {
       await prisma.job.update({ where: { id: jobId }, data: { status: 'completed', finishedAt: new Date(), lastHeartbeat: new Date() } })
-      // <<< END MODIFIED
       return new Response(JSON.stringify({ ok: true, status: 'completed' }), { status: 202, headers: { 'content-type': 'application/json' } })
     }
 
-    // >>> BEGIN ADDED: set status back to queued before self-chaining so watchdog/UI know it's resumable
     await prisma.job.update({ where: { id: jobId }, data: { status: 'queued', lastHeartbeat: new Date() } })
-    // <<< END ADDED
 
-    // re‑invoke to continue
     try {
       const host = req.headers.get('x-forwarded-host')
       const proto = req.headers.get('x-forwarded-proto') || 'https'
@@ -896,12 +839,11 @@ if (llmCacheBatch.length) {
     return new Response(JSON.stringify({ ok: true, status: 'running' }), { status: 202, headers: { 'content-type': 'application/json' } })
   } catch (err) {
     console.error('[process-upload-background] ERROR', err)
-    // >>> BEGIN ADDED: mark job failed and heartbeat on error
     try {
       const body = typeof err?.message === 'string' ? err.message : String(err)
-      await prisma.job.update({ where: { id: (await (async()=>{try{const b=await req.json();return b?.jobId}catch{return null}})()) || '' } , data: { status: 'failed', lastHeartbeat: new Date(), error: body?.slice?.(0, 2000) || '' } })
+      const bid = (await (async()=>{try{const b=await req.json();return b?.jobId}catch{return null}})()) || ''
+      await prisma.job.update({ where: { id: bid }, data: { status: 'failed', lastHeartbeat: new Date(), error: body?.slice?.(0, 2000) || '' } })
     } catch {}
-    // <<< END ADDED
     return new Response(JSON.stringify({ error: String(err?.message ?? err) }), { status: 500, headers: { 'content-type': 'application/json' } })
   }
 }
