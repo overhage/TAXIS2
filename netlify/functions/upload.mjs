@@ -236,41 +236,136 @@ export default async (event, context) => {
         }
       });
 
-      // *** REFACTORED STREAMING BRANCH ***
-      // We also listen to 'readable' to check on‑the‑fly when validation has passed and then begin streaming upload.
-      let streamingStarted = false;
-      fileStream.on('readable', async () => {
+      // *** REFACTORED STREAMING BRANCH (robust for tiny + large files) ***
+      // Strategy:
+      //  - We "tee" the incoming file stream into a PassThrough (uploader) but initially keep it paused.
+      //  - We collect chunks into bufferedChunks until validation passes.
+      //  - Once validation passes, we flush bufferedChunks into the uploader and then pipe the remainder of fileStream.
+      //  - If the stream ends before validation (tiny files), we validate bufferedChunks and then upload JUST the buffered content.
+      const uploader = new PassThrough({ highWaterMark: 1024 * 1024 });
+      let blobWriteStarted = false;
+      let blobWriteResolved = false;
+      let blobKey = null;
+
+      async function startBlobWrite(metaInfo) {
+        if (blobWriteStarted) return;
+        blobWriteStarted = true;
+        const keyBase = meta.dataset || 'uploads';
+        blobKey = `${keyBase}/${Date.now()}_${filename}`;
+        // Kick off the blob write; do not await here to avoid blocking event handlers
+        (async () => {
+          try {
+            await blobs.set({
+              bucket: storeName,
+              key: blobKey,
+              data: uploader,
+              metadata: metaInfo,
+              contentType: mimeType || 'text/csv',
+              cacheControl: 'no-store',
+            });
+            blobWriteResolved = true;
+          } catch (e) {
+            if (!responded) {
+              safeResolve({
+                statusCode: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: String(e) }),
+              });
+            }
+          }
+        })();
+      }
+
+      fileStream.on('data', (chunk) => {
+        if (validationFailed) return; // drain but ignore
+        bufferedChunks.push(chunk);
+        if (!validationDone) {
+          bufferedText += chunk.toString('utf8');
+          const lines = bufferedText.split(/
+?
+/);
+          collectedLines = lines.length - 1;
+          if (collectedLines >= sampleLines) {
+            const sample = extractFirstNLinesFromChunks(bufferedChunks, sampleLines);
+            const headerLine = getHeaderLine(sample);
+            const { ok: headerOk, delimiter } = hasRequiredHeaders(headerLine, requiredHeaders);
+            if (!headerOk) {
+              validationFailed = true;
+              return; // we'll resolve in 'end'
+            }
+            detectedDelimiter = delimiter;
+            validationDone = true;
+
+            // Start blob write now that validation passed
+            startBlobWrite({ filename, mimeType, delimiter: detectedDelimiter, ...meta });
+
+            // Flush buffered data to uploader and then pipe remainder
+            for (const c of bufferedChunks) uploader.write(c);
+            bufferedChunks.length = 0; // clear
+          }
+        } else {
+          // Already validated; write chunk straight to uploader
+          uploader.write(chunk);
+        }
+      });
+
+      fileStream.on('end', async () => {
         try {
-          if (validationFailed || streamingStarted || !validationDone) return;
+          if (validationFailed) {
+            return safeResolve({
+              statusCode: 400,
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                error: 'Validation failed: required columns missing in header',
+                required: requiredHeaders,
+              }),
+            });
+          }
 
-          // Validation just completed — start streaming upload now.
-          streamingStarted = true;
+          // If not validated yet, validate whatever we buffered (tiny files)
+          if (!validationDone) {
+            const sample = extractFirstNLinesFromChunks(bufferedChunks, sampleLines);
+            const headerLine = getHeaderLine(sample);
+            const { ok: headerOk, delimiter } = hasRequiredHeaders(headerLine, requiredHeaders);
+            if (!headerOk) {
+              return safeResolve({
+                statusCode: 400,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  error: 'Validation failed: required columns missing in header',
+                  required: requiredHeaders,
+                }),
+              });
+            }
+            detectedDelimiter = delimiter;
+            validationDone = true;
 
-          // Create a PassThrough that will receive the *remaining* bytes of the fileStream
-          const remainder = new PassThrough();
-          // Pipe the live file stream into remainder so we can append after buffered chunks
-          fileStream.pipe(remainder);
+            // Start blob write and send only buffered content
+            startBlobWrite({ filename, mimeType, delimiter: detectedDelimiter, ...meta });
+            for (const c of bufferedChunks) uploader.write(c);
+            bufferedChunks.length = 0;
+          }
 
-          // Compose full stream: buffered first, then remainder
-          const fullStream = chainBufferedWithStream(bufferedChunks, remainder);
+          // Finalize uploader stream
+          uploader.end();
 
-          const keyBase = meta.dataset || 'uploads';
-          const key = `${keyBase}/${Date.now()}_${filename}`;
+          // Wait a tick for blob write to settle
+          const waitForBlob = () => new Promise((res) => setImmediate(res));
+          await waitForBlob();
 
-          // Stream to Netlify Blobs; data can be a Readable stream
-          const res = await blobs.set({
-            bucket: storeName,
-            key,
-            data: fullStream,
-            metadata: {
-              filename,
-              mimeType,
-              delimiter: detectedDelimiter,
-              ...meta,
-            },
-            contentType: mimeType || 'text/csv',
-            cacheControl: 'no-store',
+          return safeResolve({
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ok: true, bucket: storeName, key: blobKey, metadata: { delimiter: detectedDelimiter, ...meta } }),
           });
+        } catch (err) {
+          return safeResolve({
+            statusCode: 500,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ error: String(err) }),
+          });
+        }
+      });
 
           // Wait for remainder to finish piping
           await new Promise((r, j) => {
@@ -331,3 +426,118 @@ export default async (event, context) => {
     reqStream.pipe(bb);
   });
 };
+
+
+// ============================
+// V2: Direct-to-Blob flow (works for very large files on Netlify)
+// ============================
+// Rationale: Netlify Functions receive the full request body and enforce limits (commonly ~10MB),
+// so truly large uploads should go from the browser directly to Netlify Blobs using a presigned URL.
+// This function validates a small sample (first ~100 lines) sent separately, then issues a one-time
+// upload URL. The browser uses fetch(putUrl, { method: 'PUT', body: file }) to stream directly.
+
+export const config_presign = {
+  path: '/.netlify/functions/create-upload-url',
+};
+
+export async function handler_create_upload_url(event) {
+  if (event.httpMethod !== 'POST') {
+    return {
+      statusCode: 405,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'Method Not Allowed' }),
+    };
+  }
+
+  try {
+    const storeName = process.env.BLOB_STORE || 'taxis-uploads';
+    const sampleLines = Number(process.env.VALIDATION_SAMPLE_LINES || 100);
+    const requiredHeaders = (process.env.REQUIRED_HEADERS
+      ? process.env.REQUIRED_HEADERS.split(',').map((s) => s.trim())
+      : DEFAULT_REQUIRED_HEADERS);
+
+    const { filename, mimeType, sampleBase64, meta = {} } = JSON.parse(event.body || '{}');
+    if (!filename || !sampleBase64) {
+      return {
+        statusCode: 400,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ error: 'filename and sampleBase64 are required' }),
+      };
+    }
+
+    const sampleBuf = Buffer.from(sampleBase64, 'base64');
+    const sampleText = sampleBuf.toString('utf8');
+    const headerLine = getHeaderLine(sampleText);
+    const { ok: headerOk, delimiter } = hasRequiredHeaders(headerLine, requiredHeaders);
+    if (!headerOk) {
+      return {
+        statusCode: 400,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          error: 'Validation failed: required columns missing in header',
+          required: requiredHeaders,
+          header: headerLine,
+        }),
+      };
+    }
+
+    const keyBase = meta.dataset || 'uploads';
+    const key = `${keyBase}/${Date.now()}_${filename}`;
+
+    // Create a presigned URL for direct client upload
+    const { uploadURL } = await blobs.createPresignedUploadURL({
+      bucket: storeName,
+      key,
+      contentType: mimeType || 'text/csv',
+      metadata: { filename, mimeType, delimiter, ...meta },
+    });
+
+    return {
+      statusCode: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ok: true, key, putUrl: uploadURL, delimiter }),
+    };
+  } catch (err) {
+    return {
+      statusCode: 500,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: String(err) }),
+    };
+  }
+}
+
+// ============================
+// Minimal client usage (browser)
+// ============================
+// 1) Read first ~100 lines locally for validation.
+// 2) Call create-upload-url to validate & get PUT URL.
+// 3) PUT the original File/Blob directly to Netlify Blobs (streams; no server body limits).
+/*
+async function readFirstNLines(file, n = 100) {
+  const chunk = await file.slice(0, 1024 * 64).arrayBuffer(); // read first 64KB (adjust if needed)
+  const text = new TextDecoder().decode(chunk);
+  const lines = text.split(/
+?
+/).slice(0, n).join('
+');
+  return btoa(unescape(encodeURIComponent(lines))); // base64 for transport
+}
+
+async function uploadLargeCsv(file, meta = {}) {
+  const sampleBase64 = await readFirstNLines(file, 100);
+
+  const presignRes = await fetch('/.netlify/functions/create-upload-url', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ filename: file.name, mimeType: file.type || 'text/csv', sampleBase64, meta }),
+  }).then(r => r.json());
+
+  if (!presignRes.ok) throw new Error(presignRes.error || 'Validation failed');
+
+  // Direct PUT to blob (streams upload, supports very large files)
+  const putResp = await fetch(presignRes.putUrl, { method: 'PUT', body: file });
+  if (!putResp.ok) throw new Error('Blob upload failed');
+
+  return { key: presignRes.key, delimiter: presignRes.delimiter };
+}
+*/
