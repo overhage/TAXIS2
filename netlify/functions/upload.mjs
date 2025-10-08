@@ -149,7 +149,9 @@ export default async (event, context) => {
         bufferedText += chunk.toString('utf8');
         // Counting newlines is cheaper than splitting every time,
         // but splitting keeps logic simple and still cheap for first ~100 lines
-        const lines = bufferedText.split(/\r?\n/);
+        const lines = bufferedText.split(/
+?
+/)
         collectedLines = lines.length - 1; // number of complete lines
         if (collectedLines >= sampleLines) {
           // Perform validation
@@ -283,6 +285,7 @@ export default async (event, context) => {
           bufferedText += chunk.toString('utf8');
           const lines = bufferedText.split(/
 ?
+/)
 /);
           collectedLines = lines.length - 1;
           if (collectedLines >= sampleLines) {
