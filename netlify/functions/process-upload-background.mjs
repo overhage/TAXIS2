@@ -486,7 +486,6 @@ async function classifyRelationship ({ conceptAText, conceptBText, events_ab, ev
   return { relCode: 11, relType: RELATIONSHIP_TYPES[11], rationalText: lastErrText ? `LLM error: ${lastErrText.slice(0, 200)}` : 'LLM unavailable', usedModel: MODEL_FALLBACKS[0], usage: {} }
 }
 
-// (re)define CSV line helper (may have been dropped during edits)
 function rowToCsvLine (row, headers) {
   const esc = (v) => {
     const s = String(v ?? '')
@@ -647,8 +646,13 @@ async function processRow({ row, offset, fieldMap, job }) {
 
   const code_a = code_a_raw
   const code_b = code_b_raw
-  const concept_a_name = (metaA?.concept_name || '').trim() || String(row.concept_a ?? code_a)
-  const concept_b_name = (metaB?.concept_name || '').trim() || String(row.concept_b ?? code_b)
+  
+  const concept_a_name = (metaA?.concept_name || '').trim()
+  const concept_a_code = String(row.concept_a ?? code_a_raw)
+
+  const concept_b_name = (metaB?.concept_name || '').trim()
+  const concept_b_code = String(row.concept_b ?? code_b_raw)
+
   const system_a_eff = metaA ? "OMOP" : String(system_a_raw ?? "").trim()
   const system_b_eff = metaB ? "OMOP" : String(system_b_raw ?? "").trim()
   const type_a_eff = coalesceType(metaA?.concept_class_id, type_a_raw)
@@ -699,12 +703,12 @@ async function processRow({ row, offset, fieldMap, job }) {
 
   const enriched = {
     ...row,
-    code_a,
-    code_b,
+    concept_a: concept_a_code,     // numeric code preserved
+    concept_a_t: concept_a_name,   // human-readable concept text
+    concept_b: concept_b_code,
+    concept_b_t: concept_b_name,
     system_a: system_a_eff,
     system_b: system_b_eff,
-    concept_a: concept_a_name,
-    concept_b: concept_b_name,
     type_a: typeof type_a_eff === 'string' ? type_a_eff : '',
     type_b: typeof type_b_eff === 'string' ? type_b_eff : '',
     relationship_type: relType,
