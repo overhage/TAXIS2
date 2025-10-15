@@ -122,8 +122,9 @@ export default async (req, context) => {
       data: {
         blobKey,
         originalName: safeName,
-        mime: fileMime,
-        bytes: fileBuffer.length,
+        contentType: fileMime,
+        size: fileBuffer.length,
+        store: uploadsStoreName,
         userId: null
       }
     })
