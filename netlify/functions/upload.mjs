@@ -59,6 +59,34 @@ function json (statusCode, body) {
   }
 }
 
+// Create a Blobs store using injected context when available,
+// or explicit creds in local dev / functions:serve (NETLIFY_SITE_ID + NETLIFY_BLOBS_TOKEN).
+function getUploadsStore (name) {
+  const siteID =
+    process.env.NETLIFY_SITE_ID ||
+    process.env.SITE_ID ||
+    process.env.NETLIFY_SITE_ID_FALLBACK;
+  const token =
+    process.env.NETLIFY_BLOBS_TOKEN ||
+    process.env.NETLIFY_AUTH_TOKEN;
+
+  try {
+    if (siteID && token) {
+      // Explicit creds (local/CI) — works without `netlify dev`
+      return getStore(name, { siteID, token });
+    }
+    // In production, Netlify injects creds; this will succeed without opts
+    return getStore(name);
+  } catch (e) {
+    const msg =
+      `Netlify Blobs not configured. Provide NETLIFY_SITE_ID and NETLIFY_BLOBS_TOKEN ` +
+      `(or run via netlify dev). Got siteID=${siteID ? 'set' : 'missing'}, token=${token ? 'set' : 'missing'}`;
+    console.error('[upload] blobs_error', msg, e);
+    throw new Error(msg);
+  }
+}
+
+
 // ===================== Multipart parser (single file) =====================
 async function parseMultipart (event, headers) {
   return new Promise((resolve, reject) => {
@@ -133,7 +161,7 @@ export async function handler (event, context) {
 
     // Store to Netlify Blobs
     const uploadsStoreName = process.env.UPLOADS_STORE || 'uploads'
-    const uploadsStore = getStore(uploadsStoreName)
+    const uploadsStore = getUploadsStore(uploadsStoreName)
     const safeName = (filename || 'upload.bin').replace(/[^A-Za-z0-9._-]/g, '_')
     const blobKey = `${uploadsStoreName}/${reqId}/${safeName}`
     await uploadsStore.set(blobKey, fileBufferFinal, { contentType: fileMime })
