@@ -117,6 +117,7 @@ async function parseMultipart (event, headers) {
 
 // ===================== Handler =====================
 export async function handler (event, context) {
+  const uploadsStore = getStore(process.env.UPLOADS_STORE || 'uploads');
   const marks = { start: performance?.now?.() ?? Date.now() }
   const reqId = context?.awsRequestId || rid()
 
