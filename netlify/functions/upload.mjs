@@ -59,37 +59,7 @@ function json (statusCode, body) {
   }
 }
 
-function getUploadsStore(name) {
-  const siteID =
-    process.env.NETLIFY_SITE_ID?.trim();
-  const token =
-    process.env.NETLIFY_BLOBS_TOKEN?.trim();
 
-  const isValidManualCreds = (
-    siteID && token &&
-    siteID !== 'set' &&
-    token !== 'set' &&
-    !siteID.toLowerCase().includes('example')
-  );
-
-  try {
-    if (isValidManualCreds) {
-      // Explicit creds — used only in local dev or CI
-      console.log(`[upload] using manual siteID/token`);
-      return getStore(name, { siteID, token });
-    }
-
-    // Let Netlify inject creds automatically in production
-    console.log(`[upload] using Netlify-injected Blobs creds`);
-    return getStore(name);
-  } catch (e) {
-    const msg =
-      `Netlify Blobs not configured. Provide NETLIFY_SITE_ID and NETLIFY_BLOBS_TOKEN ` +
-      `(or run via netlify dev). Got siteID=${siteID ? 'set' : 'missing'}, token=${token ? 'set' : 'missing'}`;
-    console.error('[upload] blobs_error', msg, e);
-    throw new Error(msg);
-  }
-}
 
 
 // ===================== Multipart parser (single file) =====================
@@ -167,7 +137,7 @@ export async function handler (event, context) {
 
     // Store to Netlify Blobs
     const uploadsStoreName = process.env.UPLOADS_STORE || 'uploads'
-    const uploadsStore = getUploadsStore(uploadsStoreName)
+    const uploadsStore = getStore(uploadsStoreName)
     const safeName = (filename || 'upload.bin').replace(/[^A-Za-z0-9._-]/g, '_')
     const blobKey = `${uploadsStoreName}/${reqId}/${safeName}`
     await uploadsStore.set(blobKey, fileBufferFinal, { contentType: fileMime })
