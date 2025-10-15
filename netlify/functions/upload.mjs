@@ -1,6 +1,6 @@
 /*
  * Instrumented Netlify Function: upload.mjs
- * Drop-in replacement (or merge) to trace "upload failed" causes.
+ * (minimally patched to create a Job and invoke process-upload-background.mjs)
  *
  * What it adds:
  *  - Structured JSON logging with a per-request ID
@@ -8,11 +8,18 @@
  *  - Header & size introspection (Content-Length, Content-Type, body bytes)
  *  - Clear, serialized error objects (name, message, stack, cause)
  *  - Optional ultra-verbose TRACE mode (dumps limited header/body previews)
+ *  - MINIMAL enqueue: create prisma Upload + Job rows and call background fn
  *
  * Enable locally:
  *   DEBUG_UPLOAD=1 TRACE_UPLOAD=0 netlify functions:serve --port 9999 upload
  * In production (Netlify UI → Env vars): set DEBUG_UPLOAD=1 while debugging.
  */
+import { getStore } from '@netlify/blobs'
+import Busboy from 'busboy'
+import { PrismaClient } from '@prisma/client'
+
+const prisma = globalThis.__prisma ?? new PrismaClient()
+if (!globalThis.__prisma) globalThis.__prisma = prisma
 
 // ======= Config =======
 const DEBUG = process.env.DEBUG_UPLOAD === "1";        // emit structured logs
@@ -76,6 +83,20 @@ function withTimeout(promise, ms, label = "operation") {
 
 // ======= Core handler =======
 export async function handler(event, context) {
+  // CORS preflight
+  if (event?.httpMethod?.toUpperCase() === 'OPTIONS') {
+    console.log(JSON.stringify({ t: new Date().toISOString(), type: 'preflight' }))
+    return { statusCode: 204, headers: corsHeaders(), body: '' }
+  }
+  // CORS & preflight handling
+  if (event?.httpMethod?.toUpperCase() === "OPTIONS") {
+    console.log(JSON.stringify({ t: new Date().toISOString(), type: "preflight" }));
+    return {
+      statusCode: 204,
+      headers: corsHeaders(),
+      body: "",
+    };
+  }
   const started = now();
   const startHr = hr();
   const reqId = context?.awsRequestId || rid();
@@ -170,17 +191,84 @@ export async function handler(event, context) {
     // ===== Phase: store/upload to your backend (S3, R2, Blob, DB, etc.) =====
     mark("store_start");
 
-    // ---- REPLACE THIS with your real storage call. ----
-    // Example skeleton with timeout & status logging:
-    async function storePlaceholder() {
-      // Simulate a quick no-op to prove timings/logs work
-      return { ok: true, url: null, etag: null, bytes: rawBytes };
+    // === Parse multipart to extract the file (minimal, single-file support) ===
+    let filename = fileMeta?.filename || null
+    let fileMime = fileMeta?.mime || (ctype || 'application/octet-stream')
+    let fileBufferFinal = fileBuffer
+
+    if (ctype.startsWith('multipart/form-data')) {
+      const parsed = await parseMultipart(event, headers)
+      const first = parsed.files?.[0]
+      if (!first) throw new Error('No file part found in multipart upload')
+      filename = first?.meta?.filename || filename || 'upload.bin'
+      fileMime = first?.meta?.mime || fileMime
+      fileBufferFinal = first?.buffer || Buffer.alloc(0)
     }
 
-    const storeRes = await withTimeout(storePlaceholder(), HARD_TIMEOUT_MS, "store");
+    // === Store to Netlify Blobs (uploads store) ===
+    const uploadsStoreName = process.env.UPLOADS_STORE || 'uploads'
+    const uploadsStore = getStore(uploadsStoreName)
+    const safeName = (filename || 'upload.bin').replace(/[^A-Za-z0-9._-]/g, '_')
+    const blobKey = `${uploadsStoreName}/${reqId}/${safeName}`
+    await uploadsStore.set(blobKey, fileBufferFinal, { contentType: fileMime })
+
+    const storeRes = { ok: true, blobKey, bytes: fileBufferFinal.length, mime: fileMime, filename: safeName }
     mark("store_end");
 
     logJSON("store_result", reqId, { storeRes });
+
+    // === Create Upload + Job rows (schema-compatible with background fn) ===
+    let uploadRow = null, jobRow = null, enqueueStatus = null
+    try {
+      uploadRow = await prisma.upload.create({ data: {
+        blobKey,
+        originalName: safeName,
+        mime: fileMime,
+        bytes: fileBufferFinal.length,
+        // Optional association points if you track users/tenants:
+        userId: null,
+      }})
+
+      jobRow = await prisma.job.create({ data: {
+        uploadId: uploadRow.id,
+        status: 'queued',
+        rowsProcessed: 0,
+      }})
+
+      // === Invoke background processor (minimal) ===
+      const host = headers['x-forwarded-host']
+      const proto = headers['x-forwarded-proto'] || 'https'
+      const origin = process.env.URL || (host ? `${proto}://${host}` : '')
+      if (!origin) throw new Error('Cannot resolve site origin for background call')
+
+      const bgName = process.env.BG_FUNCTION_NAME || 'process-upload-background'
+      const bgUrl = `${origin.replace(/\/$/, '')}/.netlify/functions/${bgName}`
+      const bgResp = await fetch(bgUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jobId: jobRow.id }) })
+      enqueueStatus = { status: bgResp.status, ok: bgResp.ok }
+      logJSON('enqueue_done', reqId, { jobId: jobRow.id, enqueueStatus })
+    } catch (e) {
+      logJSON('enqueue_error', reqId, { error: serializeError(e) })
+      // Keep going; the API response will still return 202 with jobId so UI can poll
+    }
+
+    // Enqueue processing job (DB/HTTP/Background function), with detailed logs
+    let enqueueStatus = { mode: process.env.QUEUE_MODE || "none" };
+    try {
+      const job = {
+        id: reqId,
+        uploadedAt: new Date().toISOString(),
+        path: event.path,
+        bytes: rawBytes,
+        mime: ctype || null,
+        filename: fileMeta?.filename || null,
+        storage: storeRes || null,
+        source: headers?.referer || null,
+      };
+      enqueueStatus = await enqueueJob(job, { reqId });
+      logJSON("enqueue_done", reqId, { enqueueStatus });
+    } catch (e) {
+      logJSON("enqueue_error", reqId, { error: serializeError(e) });
+    }
 
     // ===== Phase: respond =====
     mark("respond_start");
@@ -232,6 +320,7 @@ function json(statusCode, body) {
   return {
     statusCode,
     headers: {
+      ...corsHeaders(),
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store",
     },
@@ -239,14 +328,89 @@ function json(statusCode, body) {
   };
 }
 
-/* =====================
- * OPTIONAL: Multipart parser (Busboy) with logs
- *
- * Install: npm i busboy
- * Then uncomment and wire below to replace the placeholder.
- *
-import Busboy from 'busboy';
+function corsHeaders () {
+  const origin = process.env.CORS_ALLOW_ORIGIN || '*'
+  return {
+    'access-control-allow-origin': origin,
+    'access-control-allow-methods': 'POST, OPTIONS',
+    'access-control-allow-headers': 'content-type, authorization'
+  }
+}
+function corsHeaders() {
+  const origin = process.env.CORS_ALLOW_ORIGIN || "*";
+  return {
+    "access-control-allow-origin": origin,
+    "access-control-allow-methods": "POST, OPTIONS",
+    "access-control-allow-headers": "content-type, authorization",
+  };
+}
 
+// ========== Enqueue helpers ==========
+async function enqueueJob(job, { reqId }) {
+  const mode = (process.env.QUEUE_MODE || "none").toLowerCase();
+  const timeoutMs = Number(process.env.ENQUEUE_TIMEOUT_MS || 5000);
+  const retries = Number(process.env.ENQUEUE_RETRIES || 2);
+
+  if (mode === "none") {
+    return { ok: true, mode, note: "enqueue disabled" };
+  }
+
+  if (mode === "http") {
+    const url = process.env.QUEUE_URL;
+    if (!url) throw new Error("QUEUE_URL not set for QUEUE_MODE=http");
+    const res = await doFetchWithRetry(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ job, reqId })
+    }, { timeoutMs, retries, label: "enqueue_http" });
+    return { ok: true, mode, status: res.status };
+  }
+
+  if (mode === "bg") {
+    // Call Netlify background function (e.g., process-upload-background)
+    const site = process.env.SITE_BASE_URL || process.env.URL || process.env.DEPLOY_PRIME_URL;
+    if (!site) throw new Error("SITE_BASE_URL/URL not set for QUEUE_MODE=bg");
+    const fnName = process.env.BG_FUNCTION_NAME || "process-upload-background";
+    const url = `${site.replace(/\/$/, "")}/.netlify/functions/${fnName}`;
+    const res = await doFetchWithRetry(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ job, reqId })
+    }, { timeoutMs, retries, label: "enqueue_bg" });
+    return { ok: true, mode, status: res.status };
+  }
+
+  if (mode === "db") {
+    // Example stub: write to Postgres/Neon job table via connection string
+    // Intentionally not implemented to avoid bundling a client; keep as a hook.
+    throw new Error("db enqueue not implemented in this stub");
+  }
+
+  throw new Error(`Unknown QUEUE_MODE: ${mode}`);
+}
+
+async function doFetchWithRetry(url, init, { timeoutMs, retries, label }) {
+  const controller = new AbortController();
+  const to = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...init, signal: controller.signal });
+    if (!res.ok && retries > 0) {
+      console.log(JSON.stringify({ t: new Date().toISOString(), type: label, retrying: true, status: res.status }));
+      return doFetchWithRetry(url, init, { timeoutMs, retries: retries - 1, label });
+    }
+    return res;
+  } catch (e) {
+    if (retries > 0) {
+      console.log(JSON.stringify({ t: new Date().toISOString(), type: label, retry_on_error: true, err: serializeError(e) }));
+      return doFetchWithRetry(url, init, { timeoutMs, retries: retries - 1, label });
+    }
+    throw e;
+  } finally {
+    clearTimeout(to);
+  }
+}
+
+// ===================== Multipart parser (Busboy) with logs =====================
 async function parseMultipart(event, headers) {
   return new Promise((resolve, reject) => {
     const bb = Busboy({ headers });
@@ -256,7 +420,6 @@ async function parseMultipart(event, headers) {
       const { filename, mimeType } = info;
       const chunks = [];
       file.on('data', (d) => chunks.push(d));
-      file.on('limit', () => { /* track limits */ /* });
       file.on('end', () => {
         const buffer = Buffer.concat(chunks);
         if (DEBUG) console.log(JSON.stringify({ t: new Date().toISOString(), type: 'file_end', name, filename, mimeType, bytes: buffer.length }));
@@ -273,4 +436,3 @@ async function parseMultipart(event, headers) {
     bb.end(body);
   });
 }
- * ===================== */
