@@ -118,6 +118,9 @@ export default async (req, context) => {
 
     await uploadsStore.set(blobKey, fileBuffer, { contentType: fileMime })
 
+    // Determine userId from context if available (e.g., auth middleware)
+    const userId = context?.user?.id || null
+
     const uploadRow = await prisma.upload.create({
       data: {
         blobKey,
@@ -125,7 +128,7 @@ export default async (req, context) => {
         contentType: fileMime,
         size: fileBuffer.length,
         store: uploadsStoreName,
-        userId: null
+        userId
       }
     })
 
