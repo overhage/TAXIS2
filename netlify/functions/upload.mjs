@@ -59,23 +59,28 @@ function json (statusCode, body) {
   }
 }
 
-// Create a Blobs store using injected context when available,
-// or explicit creds in local dev / functions:serve (NETLIFY_SITE_ID + NETLIFY_BLOBS_TOKEN).
-function getUploadsStore (name) {
+function getUploadsStore(name) {
   const siteID =
-    process.env.NETLIFY_SITE_ID ||
-    process.env.SITE_ID ||
-    process.env.NETLIFY_SITE_ID_FALLBACK;
+    process.env.NETLIFY_SITE_ID?.trim();
   const token =
-    process.env.NETLIFY_BLOBS_TOKEN ||
-    process.env.NETLIFY_AUTH_TOKEN;
+    process.env.NETLIFY_BLOBS_TOKEN?.trim();
+
+  const isValidManualCreds = (
+    siteID && token &&
+    siteID !== 'set' &&
+    token !== 'set' &&
+    !siteID.toLowerCase().includes('example')
+  );
 
   try {
-    if (siteID && token) {
-      // Explicit creds (local/CI) — works without `netlify dev`
+    if (isValidManualCreds) {
+      // Explicit creds — used only in local dev or CI
+      console.log(`[upload] using manual siteID/token`);
       return getStore(name, { siteID, token });
     }
-    // In production, Netlify injects creds; this will succeed without opts
+
+    // Let Netlify inject creds automatically in production
+    console.log(`[upload] using Netlify-injected Blobs creds`);
     return getStore(name);
   } catch (e) {
     const msg =
