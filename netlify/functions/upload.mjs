@@ -1,5 +1,6 @@
 import { getStore } from '@netlify/blobs'
 import { PrismaClient } from '@prisma/client'
+import { requireUser } from './_admin-gate.mjs'
 
 const prisma = globalThis.__prisma ?? new PrismaClient()
 if (!globalThis.__prisma) globalThis.__prisma = prisma
@@ -18,20 +19,15 @@ export default async (req, context) => {
       return new Response(JSON.stringify({ error: 'Missing or invalid file field' }), { status: 400 })
     }
 
+    const user = await requireUser(req)
+    if (!user) {
+      return new Response(JSON.stringify({ error: 'not_authenticated' }), { status: 401 })
+    }
+
     const buf = Buffer.from(await blob.arrayBuffer())
-    const blobKey = `uploads/${context.params.uploadId}/${blob.name}`
+    const blobKey = `uploads/${context.params.uploadId || 'default'}/${blob.name}`
     const store = getStore('uploads')
     await store.set(blobKey, buf, { contentType: blob.type })
-
-    // Extract userId from session or headers
-    let userId = null
-    const claimsJson = req.headers.get('x-netlify-cms-user') || req.headers.get('x-user')
-    if (claimsJson) {
-      try {
-        const claims = JSON.parse(claimsJson)
-        userId = claims.sub || claims.id || claims.userid || claims.userId || null
-      } catch {}
-    }
 
     const record = await prisma.upload.create({
       data: {
@@ -40,7 +36,7 @@ export default async (req, context) => {
         contentType: blob.type,
         size: buf.length,
         store: 'uploads',
-        userId: userId ?? null
+        userId: user.id
       }
     })
 
