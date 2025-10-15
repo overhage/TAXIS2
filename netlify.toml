@@ -12,6 +12,7 @@
 # Single [functions] table — set global bundler once
 [functions]
   node_bundler = "esbuild"
+  directory = "netlify/functions"
 
 # Default: keep functions lean (no Prisma by default)
 [functions."*"]
