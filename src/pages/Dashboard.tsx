@@ -41,6 +41,13 @@ interface JobItem {
 const POLL_INTERVAL_MS = 10_000; // 10 seconds
 const LS_KEY = 'dashboard.autoRefresh';
 
+// Minimal helper to safely coerce any backend error shape to a user-friendly string
+const toMsg = (e: any): string =>
+  typeof e === 'string'
+    ? e
+    : e?.message
+    ?? (e && typeof e === 'object' ? JSON.stringify(e) : 'Unexpected error');
+
 const DashboardPage: React.FC = () => {
   const auth = useAuth() as any;
   const user = auth?.user ?? auth ?? null;
@@ -60,26 +67,27 @@ const DashboardPage: React.FC = () => {
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const pollRef = useRef<number | null>(null);
 
-const fetchJobs = async () => {
-  try {
-    const res = await axios.get('/api/jobs', { withCredentials: true });
+  const fetchJobs = async () => {
+    try {
+      const res = await axios.get('/api/jobs', { withCredentials: true });
 
-    // accept either { jobs: [...] } or [...] for backwards compatibility
-    const list =
-      Array.isArray(res.data?.jobs) ? res.data.jobs :
-      Array.isArray(res.data)      ? res.data      :
-      [];
+      // accept either { jobs: [...] } or [...] for backwards compatibility
+      const list =
+        Array.isArray(res.data?.jobs) ? res.data.jobs :
+        Array.isArray(res.data)      ? res.data      :
+        [];
 
-    setJobs(list);
-    setLastRefresh(new Date());
-    setError(null);
-  } catch (err: any) {
-    console.error('[Dashboard] jobs fetch failed', err);
-    setError(err?.response?.data?.error || 'Failed to fetch jobs.');
-  } finally {
-    setIsLoading(false);
-  }
-};
+      setJobs(list);
+      setLastRefresh(new Date());
+      setError(null);
+    } catch (err: any) {
+      console.error('[Dashboard] jobs fetch failed', err);
+      const apiErr = err?.response?.data?.error ?? err;
+      setError(toMsg(apiErr)); // ← minimal change: coerce to string
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   // Initial fetch
   useEffect(() => {
@@ -139,7 +147,8 @@ const fetchJobs = async () => {
       await fetchJobs(); // refresh right after upload
     } catch (err: any) {
       console.error('[Dashboard] upload failed', err);
-      setError(err?.response?.data?.error || 'Upload failed.');
+      const apiErr = err?.response?.data?.error ?? err;
+      setError(toMsg(apiErr)); // ← minimal change: coerce to string
     } finally {
       setUploading(false);
     }

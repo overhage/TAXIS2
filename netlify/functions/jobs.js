@@ -17,6 +17,16 @@ function json(body, status = 200) {
   })
 }
 
+// --- Minimal helper to keep error as string + rich detail object ---
+function serializeError(err) {
+  if (!err) return null
+  return {
+    name: err.name,
+    message: err.message || 'Unexpected error',
+    stack: err.stack ? String(err.stack).split('\n').slice(0, 6).join('\n') : undefined,
+  }
+}
+
 export default async (req) => {
   try {
     if (req.method !== 'GET') return json({ error: 'Method Not Allowed' }, 405)
@@ -67,7 +77,9 @@ export default async (req) => {
 
     return json({ jobs: shaped })
   } catch (err) {
-    console.error('[jobs] ERROR', err)
-    return json({ error: String(err?.message ?? err) }, 500)
+    const errObj = serializeError(err)
+    console.error('[jobs] ERROR', errObj)
+    // Minimal change: return error as string + errorDetail for parity with upload.mjs
+    return json({ error: errObj?.message || 'Jobs query failed', errorDetail: errObj }, 500)
   }
 }
