@@ -252,7 +252,7 @@ export async function handler(event, context) {
     }
 
     // Enqueue processing job (DB/HTTP/Background function), with detailed logs
-    let enqueueStatus = { mode: process.env.QUEUE_MODE || "none" };
+    enqueueStatus = { mode: process.env.QUEUE_MODE || "none" };
     try {
       const job = {
         id: reqId,
@@ -336,7 +336,7 @@ function corsHeaders () {
     'access-control-allow-headers': 'content-type, authorization'
   }
 }
-function corsHeaders() {
+function _corsHeaders_removed() {
   const origin = process.env.CORS_ALLOW_ORIGIN || "*";
   return {
     "access-control-allow-origin": origin,
