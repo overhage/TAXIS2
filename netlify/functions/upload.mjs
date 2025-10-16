@@ -101,7 +101,7 @@ export default async (req) => {
       console.error('[upload] requireUser failed:', err)
     }
 
-    const userId = user?.id || null
+    const userId = user?.email || null
     console.info('[upload] using userId:', userId)
 
     // Try to see if userId exists in DB before insert
