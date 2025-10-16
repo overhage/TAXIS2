@@ -1,20 +1,9 @@
-/*
-* upload.mjs — Netlify Functions v2 (ESM default export)
-* - Handles multipart upload via Busboy
-* - Stores file in Netlify Blobs
-* - Creates Upload + Job rows in Prisma
-* - Invokes background process function
-*/
 import { getStore } from '@netlify/blobs'
 import Busboy from 'busboy'
 import { PrismaClient } from '@prisma/client'
 import { requireUser } from './_admin-gate.mjs'
 
 console.log('[upload] Netlify Function running in v2 mode')
-
-const DEBUG = process.env.DEBUG_UPLOAD === '1'
-const TRACE = process.env.TRACE_UPLOAD === '1'
-const MAX_BYTES = Number(process.env.UPLOAD_MAX_BYTES || 50 * 1024 * 1024)
 
 const prisma = globalThis.__prisma ?? new PrismaClient()
 if (!globalThis.__prisma) globalThis.__prisma = prisma
@@ -23,11 +12,7 @@ function rid(len = 10) {
   const chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
   return Array.from({ length: len }, () => chars[Math.floor(Math.random() * chars.length)]).join('')
 }
-function safeJSON(o) { try { return JSON.stringify(o) } catch { return JSON.stringify(String(o)) } }
-function serializeError(err) {
-  if (!err) return null
-  return { name: err.name, message: err.message, stack: err.stack?.split('\n').slice(0, 6).join('\n') }
-}
+
 function corsHeaders() {
   const origin = process.env.CORS_ALLOW_ORIGIN || '*'
   return {
@@ -60,7 +45,7 @@ async function parseMultipart(req) {
   })
 }
 
-export default async (req, context) => {
+export default async (req) => {
   const reqId = rid()
   const method = req.method.toUpperCase()
 
@@ -102,77 +87,65 @@ export default async (req, context) => {
       fileMime = ctype || 'application/octet-stream'
     }
 
-    if (fileBuffer.length > MAX_BYTES) {
-      return new Response(JSON.stringify({ ok: false, error: `Payload too large (> ${MAX_BYTES} bytes)` }), {
-        status: 413,
-        headers: { ...corsHeaders(), 'content-type': 'application/json' }
-      })
-    }
-
     const safeName = filename.replace(/[^A-Za-z0-9._-]/g, '_')
     const blobKey = `${uploadsStoreName}/${reqId}/${safeName}`
 
     await uploadsStore.set(blobKey, fileBuffer, { contentType: fileMime })
 
-    // Get user ID using same pattern as in download.mjs
-    const user = await requireUser(req)
-    const userId = user?.id || null
-
-    const uploadRow = await prisma.upload.create({
-      data: {
-        blobKey,
-        originalName: safeName,
-        contentType: fileMime,
-        size: fileBuffer.length,
-        store: uploadsStoreName,
-        userId: userId
-      }
-    })
-
-    const jobRow = await prisma.job.create({
-      data: {
-        uploadId: uploadRow.id,
-        status: 'queued',
-        rowsProcessed: 0
-      }
-    })
-
-    const origin = process.env.URL || `https://${req.headers.get('x-forwarded-host')}`
-    const bgName = process.env.BG_FUNCTION_NAME || 'process-upload-background'
-    const bgUrl = `${origin.replace(/\/$/, '')}/.netlify/functions/${bgName}`
-    let enqueueStatus = null
+    // Get user
+    let user = null
     try {
-      const resp = await fetch(bgUrl, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ jobId: jobRow.id })
+      user = await requireUser(req)
+      console.info('[upload] user resolved:', user)
+    } catch (err) {
+      console.error('[upload] requireUser failed:', err)
+    }
+
+    const userId = user?.id || null
+    console.info('[upload] using userId:', userId)
+
+    // Try to see if userId exists in DB before insert
+    if (userId) {
+      const existingUser = await prisma.user.findUnique({ where: { id: userId } }).catch(() => null)
+      console.info('[upload] existingUser:', existingUser ? 'found' : 'not found')
+    }
+
+    // Attempt upload record creation
+    try {
+      const uploadRow = await prisma.upload.create({
+        data: {
+          blobKey,
+          originalName: safeName,
+          contentType: fileMime,
+          size: fileBuffer.length,
+          store: uploadsStoreName,
+          userId: userId
+        }
       })
-      enqueueStatus = { ok: resp.ok, status: resp.status }
-    } catch (e) {
-      console.error('Background enqueue error', e)
-    }
 
-    const payload = {
-      ok: true,
-      reqId,
-      upload: {
-        blobKey,
-        bytes: fileBuffer.length,
-        mime: fileMime,
-        filename: safeName,
-        id: uploadRow.id
-      },
-      job: { id: jobRow.id, enqueue: enqueueStatus }
-    }
+      console.info('[upload] uploadRow created:', uploadRow.id)
 
-    return new Response(JSON.stringify(payload), {
-      status: 200,
-      headers: { ...corsHeaders(), 'content-type': 'application/json' }
-    })
+      const jobRow = await prisma.job.create({
+        data: {
+          uploadId: uploadRow.id,
+          status: 'queued',
+          rowsProcessed: 0
+        }
+      })
+
+      console.info('[upload] jobRow created:', jobRow.id)
+
+      return new Response(JSON.stringify({ ok: true, uploadId: uploadRow.id, jobId: jobRow.id }), {
+        status: 200,
+        headers: { ...corsHeaders(), 'content-type': 'application/json' }
+      })
+    } catch (err) {
+      console.error('[upload] Prisma insert failed:', err)
+      throw err
+    }
   } catch (err) {
-    const errObj = serializeError(err)
-    console.error('[upload error]', errObj)
-    return new Response(JSON.stringify({ ok: false, error: errObj.message, detail: errObj }), {
+    console.error('[upload error]', err)
+    return new Response(JSON.stringify({ ok: false, error: err.message, stack: err.stack }), {
       status: 500,
       headers: { ...corsHeaders(), 'content-type': 'application/json' }
     })
