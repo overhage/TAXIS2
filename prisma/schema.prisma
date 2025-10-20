@@ -35,7 +35,6 @@ model User {
 
 model Upload {
   id           String   @id @default(cuid())
-  blobKey      String
   userId       String?
   user         User?     @relation(fields: [userId], references: [id])
 
