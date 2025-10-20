@@ -19,11 +19,10 @@ enum JobStatus {
 }
 
 model User {
-  id        String    @id @default(cuid())
-  email     String    @unique
+  id        String    @id 
+  email     String?   @unique
   name      String?
-  role      String
-
+  provider  String?
   uploads   Upload[]
   jobs      Job[]
 
@@ -36,8 +35,9 @@ model User {
 
 model Upload {
   id           String   @id @default(cuid())
-  userId       String
-  user         User     @relation(fields: [userId], references: [id])
+  blobKey      String
+  userId       String?
+  user         User?     @relation(fields: [userId], references: [id])
 
   blobKey      String
   originalName String
@@ -74,7 +74,7 @@ model Job {
   finishedAt    DateTime?
   // Relation to User (field name kept as `User` to match existing code)
   userId        String?
-  User          User?     @relation(fields: [userId], references: [id])
+  user          User?     @relation(fields: [userId], references: [id])
 }
 
 

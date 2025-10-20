@@ -1,4 +1,5 @@
 // netlify/functions/auth-callback.ts — patched to ensure cookie is set correctly
+// - Added minimal Prisma upsert to create/update User record using sub as id
 // - Uses multiValueHeaders.Set-Cookie for multiple cookies (AWS/Netlify requirement)
 // - Robust https detection
 // - Fallback to AUTH_SECRET if SESSION_SECRET is unset
@@ -7,6 +8,9 @@
 import type { Handler } from '@netlify/functions'
 import { readStateFromCookie } from './_auth/oauth'
 import { createSessionCookie } from './_auth/cookies'
+import { PrismaClient } from '@prisma/client'
+
+const prisma = new PrismaClient()
 
 async function exchangeGoogle(code: string) {
   const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
@@ -81,14 +85,20 @@ export const handler: Handler = async (event) => {
     }
 
     const admins = (process.env.ADMIN_EMAILS || '')
-    .split(',')
-    .map(s => s.trim().toLowerCase())
-    .filter(Boolean);
+      .split(',')
+      .map(s => s.trim().toLowerCase())
+      .filter(Boolean)
 
     if (user.email && admins.includes(user.email.toLowerCase())) {
-      session.roles.push('admin');
+      session.roles.push('admin')
     }
 
+    // --- Minimal addition: ensure User record exists in Prisma ---
+    await prisma.user.upsert({
+      where: { id: session.sub },
+      update: { email: user.email, name: user.name, provider },
+      create: { id: session.sub, email: user.email, name: user.name, provider }
+    })
 
     const secret = process.env.SESSION_SECRET || process.env.AUTH_SECRET
     if (!secret) {
@@ -99,7 +109,6 @@ export const handler: Handler = async (event) => {
     const { cookie } = createSessionCookie(session, secret, secure)
     const clearState = 'oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0' + (secure ? '; Secure' : '')
 
-    // Netlify/AWS Lambda requires multiValueHeaders for multiple Set-Cookie values
     return {
       statusCode: 302,
       headers: {
