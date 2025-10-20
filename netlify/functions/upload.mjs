@@ -101,13 +101,19 @@ export default async (req) => {
       console.error('[upload] requireUser failed:', err)
     }
 
-    const userId = user?.email || null
+    // Use sub for foreign key consistency
+    const userId = user?.sub || null
     console.info('[upload] using userId:', userId)
 
-    // Try to see if userId exists in DB before insert
+    // Ensure User record exists (aligns with new schema where id = sub)
+    let dbUser = null
     if (userId) {
-      const existingUser = await prisma.user.findUnique({ where: { id: userId } }).catch(() => null)
-      console.info('[upload] existingUser:', existingUser ? 'found' : 'not found')
+      dbUser = await prisma.user.upsert({
+        where: { id: userId },
+        update: { email: user?.email, name: user?.name, provider: user?.provider },
+        create: { id: userId, email: user?.email, name: user?.name, provider: user?.provider }
+      })
+      console.info('[upload] ensured user record:', dbUser.id)
     }
 
     // Attempt upload record creation
