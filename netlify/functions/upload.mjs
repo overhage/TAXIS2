@@ -141,6 +141,21 @@ export default async (req) => {
 
       console.info('[upload] jobRow created:', jobRow.id)
 
+      // --- Trigger background processing for the new job ---
+      try {
+        const base =
+          process.env.URL || process.env.DEPLOY_URL || process.env.NETLIFY_BASE_URL || 'https://taxis2.netlify.app'
+        await fetch(`${base}/.netlify/functions/process-upload-background`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ jobId: jobRow.id })
+        })
+        console.info('[upload] triggered process-upload-background for job:', jobRow.id)
+      } catch (err) {
+        console.error('[upload] failed to trigger background worker:', err)
+      }
+
+
       return new Response(JSON.stringify({ ok: true, uploadId: uploadRow.id, jobId: jobRow.id }), {
         status: 200,
         headers: { ...corsHeaders(), 'content-type': 'application/json' }
