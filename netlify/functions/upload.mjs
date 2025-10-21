@@ -1,135 +1,102 @@
+// netlify/functions/upload.mjs — Revised for large files using direct client-to-Blobs upload
+// This function no longer handles file binary data directly.
+// Instead, it issues a signed upload URL the client uses to upload large files directly to Netlify Blobs.
+// After upload completion, the client POSTs metadata back to this endpoint to create Upload and Job records.
+
 import { getStore } from '@netlify/blobs'
-import Busboy from 'busboy'
 import { PrismaClient } from '@prisma/client'
 import { requireUser } from './_admin-gate.mjs'
 
-console.log('[upload] Netlify Function running in v2 mode')
+console.log('[upload] Direct-to-Blobs mode enabled')
 
 const prisma = globalThis.__prisma ?? new PrismaClient()
 if (!globalThis.__prisma) globalThis.__prisma = prisma
-
-function rid(len = 10) {
-  const chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
-  return Array.from({ length: len }, () => chars[Math.floor(Math.random() * chars.length)]).join('')
-}
 
 function corsHeaders() {
   const origin = process.env.CORS_ALLOW_ORIGIN || '*'
   return {
     'access-control-allow-origin': origin,
-    'access-control-allow-methods': 'POST, OPTIONS',
+    'access-control-allow-methods': 'GET, POST, OPTIONS',
     'access-control-allow-headers': 'content-type, authorization'
   }
 }
 
-async function parseMultipart(req) {
-  return new Promise((resolve, reject) => {
-    const bb = Busboy({ headers: Object.fromEntries(req.headers) })
-    const files = []
-    const fields = {}
-    bb.on('file', (name, file, info) => {
-      const { filename, mimeType } = info
-      const chunks = []
-      file.on('data', (d) => chunks.push(d))
-      file.on('end', () => {
-        const buffer = Buffer.concat(chunks)
-        files.push({ name, buffer, meta: { filename, mime: mimeType, size: buffer.length } })
-      })
-    })
-    bb.on('field', (name, val) => { fields[name] = val })
-    bb.on('error', reject)
-    bb.on('close', () => resolve({ files, fields }))
-    req.arrayBuffer().then((buf) => {
-      bb.end(Buffer.from(buf))
-    }).catch(reject)
-  })
-}
-
 export default async (req) => {
-  const reqId = rid()
   const method = req.method.toUpperCase()
 
   if (method === 'OPTIONS') {
     return new Response('', { status: 204, headers: corsHeaders() })
   }
 
-  if (method !== 'POST') {
-    return new Response(JSON.stringify({ ok: false, error: `Method ${method} not allowed`, reqId }), {
-      status: 405,
-      headers: { ...corsHeaders(), 'content-type': 'application/json' }
-    })
+  // Step 1: issue signed upload URL (client requests this first)
+  if (method === 'GET') {
+    try {
+      const storeName = process.env.UPLOADS_STORE || 'uploads'
+      const store = getStore(storeName)
+      const key = `${storeName}/${Date.now()}-${Math.random().toString(36).slice(2)}`
+
+      const { url } = await store.getUploadUrl(key, {
+        access: 'public',
+        metadata: { issuedAt: new Date().toISOString() }
+      })
+
+      return new Response(JSON.stringify({ ok: true, uploadUrl: url, blobKey: key }), {
+        status: 200,
+        headers: { ...corsHeaders(), 'content-type': 'application/json' }
+      })
+    } catch (err) {
+      console.error('[upload GET error]', err)
+      return new Response(JSON.stringify({ ok: false, error: err.message }), {
+        status: 500,
+        headers: { ...corsHeaders(), 'content-type': 'application/json' }
+      })
+    }
   }
 
-  try {
-    const headers = Object.fromEntries(req.headers)
-    const ctype = headers['content-type'] || ''
-    const uploadsStoreName = process.env.UPLOADS_STORE || 'uploads'
-    const uploadsStore = getStore(uploadsStoreName)
+  // Step 2: client POSTs metadata after completing the upload
+  if (method === 'POST') {
+    try {
+      const body = await req.json()
+      const { blobKey, originalName, contentType, size } = body || {}
 
-    let fileBuffer, fileMime, filename
-
-    if (ctype.startsWith('multipart/form-data')) {
-      const parsed = await parseMultipart(req)
-      const first = parsed.files?.[0]
-      if (!first) {
-        return new Response(JSON.stringify({ ok: false, error: 'No file found', reqId }), {
+      if (!blobKey || !originalName) {
+        return new Response(JSON.stringify({ ok: false, error: 'Missing blobKey or originalName' }), {
           status: 400,
           headers: { ...corsHeaders(), 'content-type': 'application/json' }
         })
       }
-      fileBuffer = first.buffer
-      filename = first.meta.filename || 'upload.bin'
-      fileMime = first.meta.mime || 'application/octet-stream'
-    } else {
-      const arrBuf = await req.arrayBuffer()
-      fileBuffer = Buffer.from(arrBuf)
-      filename = 'upload.bin'
-      fileMime = ctype || 'application/octet-stream'
-    }
 
-    const safeName = filename.replace(/[^A-Za-z0-9._-]/g, '_')
-    const blobKey = `${uploadsStoreName}/${reqId}/${safeName}`
+      // Get user context
+      let user = null
+      try {
+        user = await requireUser(req)
+      } catch (err) {
+        console.error('[upload] requireUser failed:', err)
+      }
 
-    await uploadsStore.set(blobKey, fileBuffer, { contentType: fileMime })
+      const userId = user?.sub || null
+      console.info('[upload] using userId:', userId)
 
-    // Get user
-    let user = null
-    try {
-      user = await requireUser(req)
-      console.info('[upload] user resolved:', user)
-    } catch (err) {
-      console.error('[upload] requireUser failed:', err)
-    }
+      // Ensure User record exists
+      if (userId) {
+        await prisma.user.upsert({
+          where: { id: userId },
+          update: { email: user?.email, name: user?.name, provider: user?.provider },
+          create: { id: userId, email: user?.email, name: user?.name, provider: user?.provider }
+        })
+      }
 
-    // Use sub for foreign key consistency
-    const userId = user?.sub || null
-    console.info('[upload] using userId:', userId)
-
-    // Ensure User record exists (aligns with new schema where id = sub)
-    let dbUser = null
-    if (userId) {
-      dbUser = await prisma.user.upsert({
-        where: { id: userId },
-        update: { email: user?.email, name: user?.name, provider: user?.provider },
-        create: { id: userId, email: user?.email, name: user?.name, provider: user?.provider }
-      })
-      console.info('[upload] ensured user record:', dbUser.id)
-    }
-
-    // Attempt upload record creation
-    try {
+      // Create upload + job records
       const uploadRow = await prisma.upload.create({
         data: {
           blobKey,
-          originalName: safeName,
-          contentType: fileMime,
-          size: fileBuffer.length,
-          store: uploadsStoreName,
-          userId: userId
+          originalName,
+          contentType: contentType || 'application/octet-stream',
+          size: size || 0,
+          store: process.env.UPLOADS_STORE || 'uploads',
+          userId
         }
       })
-
-      console.info('[upload] uploadRow created:', uploadRow.id)
 
       const jobRow = await prisma.job.create({
         data: {
@@ -139,9 +106,7 @@ export default async (req) => {
         }
       })
 
-      console.info('[upload] jobRow created:', jobRow.id)
-
-      // --- Trigger background processing for the new job ---
+      // Trigger background processing
       try {
         const base =
           process.env.URL || process.env.DEPLOY_URL || process.env.NETLIFY_BASE_URL || 'https://taxis2.netlify.app'
@@ -155,20 +120,21 @@ export default async (req) => {
         console.error('[upload] failed to trigger background worker:', err)
       }
 
-
       return new Response(JSON.stringify({ ok: true, uploadId: uploadRow.id, jobId: jobRow.id }), {
         status: 200,
         headers: { ...corsHeaders(), 'content-type': 'application/json' }
       })
     } catch (err) {
-      console.error('[upload] Prisma insert failed:', err)
-      throw err
+      console.error('[upload POST error]', err)
+      return new Response(JSON.stringify({ ok: false, error: err.message }), {
+        status: 500,
+        headers: { ...corsHeaders(), 'content-type': 'application/json' }
+      })
     }
-  } catch (err) {
-    console.error('[upload error]', err)
-    return new Response(JSON.stringify({ ok: false, error: err.message, stack: err.stack }), {
-      status: 500,
-      headers: { ...corsHeaders(), 'content-type': 'application/json' }
-    })
   }
+
+  return new Response(JSON.stringify({ ok: false, error: 'Unsupported method' }), {
+    status: 405,
+    headers: { ...corsHeaders(), 'content-type': 'application/json' }
+  })
 }

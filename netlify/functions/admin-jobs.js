@@ -90,7 +90,10 @@ export default async (req) => {
         },
       })
       // hydrate user email + filename if helpful
-      const users = await prisma.user.findMany({ where: { id: { in: Array.from(new Set(rows.map((r) => r.userId))) } }, select: { id: true, email: true } })
+      const userIds = Array.from(new Set(rows.map((r) => r.userId))).filter(Boolean)
+      const users = userIds.length
+        ? await prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, email: true } })
+        : []
       const userMap = new Map(users.map((u) => [u.id, u.email]))
       const uploads = await prisma.upload.findMany({ where: { id: { in: Array.from(new Set(rows.map((r) => r.uploadId))) } }, select: { id: true, originalName: true } })
       const uploadMap = new Map(uploads.map((u) => [u.id, u.originalName]))
