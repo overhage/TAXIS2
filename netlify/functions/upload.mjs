@@ -22,6 +22,8 @@ function corsHeaders() {
 }
 
 export default async (req) => {
+  console.log('[upload] BUILD CHECK using @netlify/blobs@10.0.10');
+
   try {
     const method = req.method?.toUpperCase?.() || 'UNKNOWN'
     console.info(`[upload] Handling ${method} request`)
