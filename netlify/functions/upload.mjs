@@ -1,13 +1,11 @@
-// netlify/functions/upload.mjs — Revised for large files using direct client-to-Blobs upload
-// This function no longer handles file binary data directly.
-// Instead, it issues a signed upload URL the client uses to upload large files directly to Netlify Blobs.
-// After upload completion, the client POSTs metadata back to this endpoint to create Upload and Job records.
+// Enhanced upload.mjs with detailed debug logging and robust error guards
+// Supports direct-to-Blobs large file uploads
 
 import { getStore } from '@netlify/blobs'
 import { PrismaClient } from '@prisma/client'
 import { requireUser } from './_admin-gate.mjs'
 
-console.log('[upload] Direct-to-Blobs mode enabled')
+console.log('[upload] Direct-to-Blobs mode with extended logging enabled')
 
 const prisma = globalThis.__prisma ?? new PrismaClient()
 if (!globalThis.__prisma) globalThis.__prisma = prisma
@@ -22,30 +20,36 @@ function corsHeaders() {
 }
 
 export default async (req) => {
-  const method = req.method.toUpperCase()
+  const method = req.method?.toUpperCase?.() || 'UNKNOWN'
+  console.info(`[upload] request method: ${method}`)
 
   if (method === 'OPTIONS') {
     return new Response('', { status: 204, headers: corsHeaders() })
   }
 
-  // Step 1: issue signed upload URL (client requests this first)
+  // --- GET: issue signed upload URL ---
   if (method === 'GET') {
     try {
+      console.info('[upload GET] issuing signed URL...')
       const storeName = process.env.UPLOADS_STORE || 'uploads'
       const store = getStore(storeName)
-      const key = `${storeName}/${Date.now()}-${Math.random().toString(36).slice(2)}`
+      if (!store?.getUploadUrl) {
+        throw new Error('getUploadUrl not available — ensure @netlify/blobs@>=5.0.0 is installed')
+      }
 
+      const key = `${storeName}/${Date.now()}-${Math.random().toString(36).slice(2)}`
       const { url } = await store.getUploadUrl(key, {
         access: 'public',
         metadata: { issuedAt: new Date().toISOString() }
       })
 
+      console.info('[upload GET] signed URL issued for key:', key)
       return new Response(JSON.stringify({ ok: true, uploadUrl: url, blobKey: key }), {
         status: 200,
         headers: { ...corsHeaders(), 'content-type': 'application/json' }
       })
     } catch (err) {
-      console.error('[upload GET error]', err)
+      console.error('[upload GET error]', err.stack || err)
       return new Response(JSON.stringify({ ok: false, error: err.message }), {
         status: 500,
         headers: { ...corsHeaders(), 'content-type': 'application/json' }
@@ -53,40 +57,54 @@ export default async (req) => {
     }
   }
 
-  // Step 2: client POSTs metadata after completing the upload
+  // --- POST: client notifies after uploading to Blobs ---
   if (method === 'POST') {
+    let body = {}
     try {
-      const body = await req.json()
+      body = await req.json()
+    } catch (e) {
+      console.error('[upload POST] invalid or non-JSON body')
+      return new Response(JSON.stringify({ ok: false, error: 'Expected JSON body' }), {
+        status: 400,
+        headers: { ...corsHeaders(), 'content-type': 'application/json' }
+      })
+    }
+
+    console.info('[upload POST] received body:', body)
+
+    try {
       const { blobKey, originalName, contentType, size } = body || {}
 
       if (!blobKey || !originalName) {
+        console.warn('[upload POST] missing blobKey or originalName')
         return new Response(JSON.stringify({ ok: false, error: 'Missing blobKey or originalName' }), {
           status: 400,
           headers: { ...corsHeaders(), 'content-type': 'application/json' }
         })
       }
 
-      // Get user context
+      // --- user context ---
       let user = null
       try {
         user = await requireUser(req)
+        console.info('[upload POST] user resolved:', user)
       } catch (err) {
-        console.error('[upload] requireUser failed:', err)
+        console.error('[upload POST] requireUser failed:', err)
       }
 
       const userId = user?.sub || null
-      console.info('[upload] using userId:', userId)
+      console.info('[upload POST] using userId:', userId)
 
-      // Ensure User record exists
       if (userId) {
         await prisma.user.upsert({
           where: { id: userId },
           update: { email: user?.email, name: user?.name, provider: user?.provider },
           create: { id: userId, email: user?.email, name: user?.name, provider: user?.provider }
         })
+        console.info('[upload POST] ensured user record:', userId)
       }
 
-      // Create upload + job records
+      // --- create upload + job entries ---
       const uploadRow = await prisma.upload.create({
         data: {
           blobKey,
@@ -97,6 +115,7 @@ export default async (req) => {
           userId
         }
       })
+      console.info('[upload POST] uploadRow created:', uploadRow.id)
 
       const jobRow = await prisma.job.create({
         data: {
@@ -105,19 +124,19 @@ export default async (req) => {
           rowsProcessed: 0
         }
       })
+      console.info('[upload POST] jobRow created:', jobRow.id)
 
-      // Trigger background processing
+      // --- trigger background processor ---
       try {
-        const base =
-          process.env.URL || process.env.DEPLOY_URL || process.env.NETLIFY_BASE_URL || 'https://taxis2.netlify.app'
-        await fetch(`${base}/.netlify/functions/process-upload-background`, {
+        const base = process.env.URL || process.env.DEPLOY_URL || process.env.NETLIFY_BASE_URL || 'https://taxis2.netlify.app'
+        const res = await fetch(`${base}/.netlify/functions/process-upload-background`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ jobId: jobRow.id })
         })
-        console.info('[upload] triggered process-upload-background for job:', jobRow.id)
+        console.info('[upload POST] triggered background worker, status:', res.status)
       } catch (err) {
-        console.error('[upload] failed to trigger background worker:', err)
+        console.error('[upload POST] failed to trigger background worker:', err)
       }
 
       return new Response(JSON.stringify({ ok: true, uploadId: uploadRow.id, jobId: jobRow.id }), {
@@ -125,14 +144,16 @@ export default async (req) => {
         headers: { ...corsHeaders(), 'content-type': 'application/json' }
       })
     } catch (err) {
-      console.error('[upload POST error]', err)
-      return new Response(JSON.stringify({ ok: false, error: err.message }), {
+      console.error('[upload POST error]', err.stack || err)
+      return new Response(JSON.stringify({ ok: false, error: err.message, stack: err.stack }), {
         status: 500,
         headers: { ...corsHeaders(), 'content-type': 'application/json' }
       })
     }
   }
 
+  // --- fallback ---
+  console.warn('[upload] unsupported method:', method)
   return new Response(JSON.stringify({ ok: false, error: 'Unsupported method' }), {
     status: 405,
     headers: { ...corsHeaders(), 'content-type': 'application/json' }
